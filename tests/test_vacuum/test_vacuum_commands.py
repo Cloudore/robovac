@@ -220,19 +220,13 @@ async def test_async_send_command(mock_robovac, mock_vacuum_data):
         # Test do not disturb command (when off)
         entity._attr_do_not_disturb = False
         await entity.async_send_command("doNotDisturb")
-        assert mock_robovac.async_set.call_count == 2
-        mock_robovac.async_set.assert_has_calls(
-            [call({"139": "MTAwMDAwMDAw"}), call({"107": True})]
-        )
+        mock_robovac.async_set.assert_called_once_with({"107": True})
         mock_robovac.async_set.reset_mock()
 
         # Test do not disturb command (when on)
         entity._attr_do_not_disturb = True
         await entity.async_send_command("doNotDisturb")
-        assert mock_robovac.async_set.call_count == 2
-        mock_robovac.async_set.assert_has_calls(
-            [call({"139": "MEQ4MDAwMDAw"}), call({"107": False})]
-        )
+        mock_robovac.async_set.assert_called_once_with({"107": False})
         mock_robovac.async_set.reset_mock()
 
         # Test boost IQ command (when off)

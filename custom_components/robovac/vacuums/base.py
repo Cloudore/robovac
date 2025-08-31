@@ -17,6 +17,8 @@ class RoboVacEntityFeature(IntEnum):
     ZONE = 256
     MAP = 512
     BOOST_IQ = 1024
+    WATER_LEVEL = 2048
+    MOP_MODE = 4096
 
 
 class RobovacCommand(StrEnum):
@@ -35,6 +37,8 @@ class RobovacCommand(StrEnum):
     DO_NOT_DISTURB = "do_not_disturb"
     BOOST_IQ = "boost_iq"
     CONSUMABLES = "consumables"
+    WATER_LEVEL = "water_level"
+    MOP_MODE = "mop_mode"
 
 
 class TuyaCodes(StrEnum):

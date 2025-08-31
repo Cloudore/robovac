@@ -50,3 +50,13 @@ logger:
     custom_components.robovac.vacuum: debug
     custom_components.robovac.tuyalocalapi: debug
 ```
+
+## T2320 available modes
+
+The RoboVac X9 Pro (model T2320) now exposes additional cleaning options:
+
+- **Fan speeds**: Quiet, Standard, Turbo, Max
+- **Mop modes**: Standard, Deep
+- **Water levels**: Low, Medium, High
+
+These settings can be adjusted from Home Assistant and are available for external bridges such as HomeKit.

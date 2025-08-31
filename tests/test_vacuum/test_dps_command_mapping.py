@@ -157,6 +157,7 @@ async def test_vacuum_update_uses_correct_dps_codes() -> None:
         "5": "auto",       # Mode
         "102": "Standard"  # Fan speed
     }
+    mock_robovac.getRoboVacHumanReadableValue.side_effect = lambda command, value: value
 
     # Initialize the vacuum entity
     with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):

@@ -72,6 +72,8 @@ ATTR_DO_NOT_DISTURB = "do_not_disturb"
 ATTR_BOOST_IQ = "boost_iq"
 ATTR_CONSUMABLES = "consumables"
 ATTR_MODE = "mode"
+ATTR_WATER_LEVEL = "water_level"
+ATTR_MOP_MODE = "mop_mode"
 
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=REFRESH_RATE)
@@ -116,6 +118,8 @@ class RoboVacEntity(StateVacuumEntity):
     _attr_boost_iq: str | None = None
     _attr_consumables: str | None = None
     _attr_mode: str | None = None
+    _attr_water_level: str | None = None
+    _attr_mop_mode: str | None = None
     _attr_robovac_supported: int | None = None
     _attr_activity_mapping: dict[str, VacuumActivity] | None = None
     _attr_error_code: int | str | None = None
@@ -165,6 +169,16 @@ class RoboVacEntity(StateVacuumEntity):
     def boost_iq(self) -> str | None:
         """Return the boost_iq mode of the vacuum cleaner."""
         return self._attr_boost_iq
+
+    @property
+    def water_level(self) -> str | None:
+        """Return the water level of the vacuum cleaner."""
+        return self._attr_water_level
+
+    @property
+    def mop_mode(self) -> str | None:
+        """Return the mop mode of the vacuum cleaner."""
+        return self._attr_mop_mode
 
     @property
     def tuya_state(self) -> str | int | None:
@@ -386,6 +400,18 @@ class RoboVacEntity(StateVacuumEntity):
             and self.boost_iq
         ):
             data[ATTR_BOOST_IQ] = self.boost_iq
+        if (
+            self.robovac_supported is not None
+            and self.robovac_supported & RoboVacEntityFeature.WATER_LEVEL
+            and self.water_level
+        ):
+            data[ATTR_WATER_LEVEL] = self.water_level
+        if (
+            self.robovac_supported is not None
+            and self.robovac_supported & RoboVacEntityFeature.MOP_MODE
+            and self.mop_mode
+        ):
+            data[ATTR_MOP_MODE] = self.mop_mode
         if (
             self.robovac_supported is not None
             and self.robovac_supported & RoboVacEntityFeature.CONSUMABLES
@@ -835,6 +861,14 @@ class RoboVacEntity(StateVacuumEntity):
 
             boost_iq = self.tuyastatus.get(self._get_dps_code("BOOST_IQ"))
             self._attr_boost_iq = str(boost_iq) if boost_iq is not None else None
+
+            water_level = self.tuyastatus.get(self._get_dps_code("WATER_LEVEL"))
+            self._attr_water_level = (
+                str(water_level) if water_level is not None else None
+            )
+
+            mop_mode = self.tuyastatus.get(self._get_dps_code("MOP_MODE"))
+            self._attr_mop_mode = str(mop_mode) if mop_mode is not None else None
 
         # Handle consumables
         if (

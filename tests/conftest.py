@@ -40,6 +40,7 @@ def _command_value(command, value):
             "pure": "Quiet",
             "standard": "Standard",
         },
+        RobovacCommand.START_PAUSE: {"pause": False},
     }
     result = mapping.get(command)
     if isinstance(result, dict):
@@ -78,12 +79,14 @@ def mock_robovac():
     )
     mock.getFanSpeeds.return_value = ["No Suction", "Standard", "Boost IQ", "Max"]
     mock._dps = {}
+    mock.getRoboVacActivityMapping.return_value = None
 
     # Set up async methods with AsyncMock
     mock.async_get = AsyncMock(return_value=mock._dps)
     mock.async_set = AsyncMock(return_value=True)
     mock.async_disable = AsyncMock(return_value=True)
     mock.getRoboVacCommandValue.side_effect = _command_value
+    mock.getRoboVacHumanReadableValue.side_effect = lambda command, value: value
 
     return mock
 
@@ -110,12 +113,14 @@ def mock_g30():
     )
     mock.getFanSpeeds.return_value = ["No Suction", "Standard", "Boost IQ", "Max"]
     mock._dps = {}
+    mock.getRoboVacActivityMapping.return_value = None
 
     # Set up async methods with AsyncMock
     mock.async_get = AsyncMock(return_value=mock._dps)
     mock.async_set = AsyncMock(return_value=True)
     mock.async_disable = AsyncMock(return_value=True)
     mock.getRoboVacCommandValue.side_effect = _command_value
+    mock.getRoboVacHumanReadableValue.side_effect = lambda command, value: value
 
     return mock
 
@@ -169,6 +174,7 @@ def mock_l60():
     )
     mock.getFanSpeeds.return_value = ["No Suction", "Standard", "Boost IQ", "Max"]
     mock._dps = {}
+    mock.getRoboVacActivityMapping.return_value = None
 
     # Set up model-specific DPS codes for L60 (T2278)
     mock.getDpsCodes.return_value = {
@@ -186,6 +192,7 @@ def mock_l60():
     mock.async_set = AsyncMock(return_value=True)
     mock.async_disable = AsyncMock(return_value=True)
     mock.getRoboVacCommandValue.side_effect = _command_value
+    mock.getRoboVacHumanReadableValue.side_effect = lambda command, value: value
 
     return mock
 
