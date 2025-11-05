@@ -79,6 +79,27 @@ class RoboVac(TuyaDevice):
         """
         return self.model_details.activity_mapping
 
+    def getRoomNames(self) -> dict[int, str] | None:
+        """Return the configured mapping of room identifiers to friendly names."""
+
+        mapping = getattr(self.model_details, "room_names", None)
+        if not isinstance(mapping, Mapping):
+            return None
+
+        resolved: dict[int, str] = {}
+        for key, name in mapping.items():
+            if not isinstance(name, str) or not name.strip():
+                continue
+
+            try:
+                room_id = int(key)
+            except (TypeError, ValueError):
+                continue
+
+            resolved[room_id] = name.strip()
+
+        return resolved or None
+
     def _get_command_values(
         self, command_name: RobovacCommand
     ) -> dict[str, str] | None:
@@ -147,7 +168,20 @@ class RoboVac(TuyaDevice):
             # All others use the same code names
         }
 
-        codes = {}
+        # Start with any model-specific overrides supplied directly via
+        # the RobovacModelDetails definition (e.g. DPS slots that do not
+        # have a corresponding RobovacCommand entry).
+        extra_codes = getattr(self.model_details, "dps_codes", None)
+        codes: dict[str, Any] = {}
+        if extra_codes:
+            for name, value in extra_codes.items():
+                # Preserve iterable values (like consumables lists) while
+                # normalising scalar codes to strings for consistency with
+                # Tuya DPS identifiers.
+                if isinstance(value, (list, tuple)):
+                    codes[name] = list(value)
+                else:
+                    codes[name] = str(value)
         # Extract codes from commands dictionary
         for key, value in self.model_details.commands.items():
             # Get the DPS name from the mapping, or use the command name if not in mapping

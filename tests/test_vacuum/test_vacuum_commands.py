@@ -1,10 +1,14 @@
 """Tests for the RoboVac vacuum entity commands."""
 
+import base64
+import json
+
 import pytest
 from unittest.mock import MagicMock, call, patch
 
 from homeassistant.components.vacuum import VacuumEntityFeature
 
+from custom_components.robovac.const import CONF_ROOM_NAMES
 from custom_components.robovac.vacuum import RoboVacEntity
 from custom_components.robovac.vacuums.base import RobovacCommand
 
@@ -246,6 +250,78 @@ async def test_async_send_command(mock_robovac, mock_vacuum_data):
         await entity.async_send_command("boostIQ")
         mock_robovac.async_set.assert_called_once_with({"118": False})
 
+
+@pytest.mark.asyncio
+async def test_async_send_command_room_clean_uses_model_code(
+    mock_robovac, mock_vacuum_data
+):
+    """Ensure roomClean uses the model-specific ROOM_CLEAN DPS code."""
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        mock_robovac.getDpsCodes.return_value = {"ROOM_CLEAN": "168"}
+        entity = RoboVacEntity(mock_vacuum_data)
+
+        with patch("custom_components.robovac.vacuum.time.time", return_value=1234.567):
+            await entity.async_send_command(
+                "roomClean", {"roomIds": [100], "count": 2}
+            )
+
+        expected_payload = base64.b64encode(
+            json.dumps(
+                {
+                    "method": "selectRoomsClean",
+                    "data": {"roomIds": [100], "cleanTimes": 2},
+                    "timestamp": 1234567,
+                },
+                separators=(",", ":"),
+            ).encode("utf8")
+        ).decode("utf8")
+
+        mock_robovac.async_set.assert_called_once_with({"168": expected_payload})
+
+
+@pytest.mark.asyncio
+async def test_async_send_command_room_clean_accepts_room_names(
+    mock_robovac, mock_vacuum_data
+):
+    """Ensure roomClean resolves room names to ids when provided."""
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        mock_robovac.getDpsCodes.return_value = {"ROOM_CLEAN": "168"}
+        mock_robovac.getRoomNames.return_value = {100: "Kitchen"}
+        entity = RoboVacEntity(mock_vacuum_data)
+
+        with patch("custom_components.robovac.vacuum.time.time", return_value=321.0):
+            await entity.async_send_command(
+                "roomClean", {"roomNames": ["Kitchen"], "count": 1}
+            )
+
+        expected_payload = base64.b64encode(
+            json.dumps(
+                {
+                    "method": "selectRoomsClean",
+                    "data": {"roomIds": [100], "cleanTimes": 1},
+                    "timestamp": 321000,
+                },
+                separators=(",", ":"),
+            ).encode("utf8")
+        ).decode("utf8")
+
+        mock_robovac.async_set.assert_called_once_with({"168": expected_payload})
+
+
+@pytest.mark.asyncio
+async def test_extra_state_attributes_include_room_names(mock_robovac, mock_vacuum_data):
+    """Room names should be exposed when the feature is supported."""
+
+    data = dict(mock_vacuum_data)
+    data[CONF_ROOM_NAMES] = {"200": "Configured"}
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(data)
+
+    attrs = entity.extra_state_attributes
+    assert attrs["room_names"] == {200: "Configured", 100: "Kitchen", 101: "Bedroom"}
 
 @pytest.mark.asyncio
 async def test_async_update(mock_robovac, mock_vacuum_data):

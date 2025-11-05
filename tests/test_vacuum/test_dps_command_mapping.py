@@ -133,6 +133,8 @@ def test_getDpsCodes_extraction_method() -> None:
         assert "ERROR_CODE" in t2320_dps_codes
         assert t2320_dps_codes["ERROR_CODE"] == "169"  # Non-default code
         assert t2320_dps_codes["ERROR_CODE"] != TuyaCodes.ERROR_CODE
+        assert "ROOM_CLEAN" in t2320_dps_codes
+        assert t2320_dps_codes["ROOM_CLEAN"] == "168"
 
 
 def test_status_mapping_t2320() -> None:

@@ -18,7 +18,18 @@ class T2320(RobovacModelDetails):
     robovac_features = (
         RoboVacEntityFeature.DO_NOT_DISTURB
         | RoboVacEntityFeature.BOOST_IQ
+        | RoboVacEntityFeature.ROOM
     )
+    # DPS 168 carries the protobuf payload that enumerates the requested
+    # room ids when "selectRoomsClean" is issued. The payload includes the
+    # decimal room id (e.g. 100 -> 0x64) which we surface as the
+    # ROOM_CLEAN command slot so Home Assistant can target specific rooms.
+    room_names = {
+        100: "Room 100",  # Replace with the label reported in the Eufy app for ID 100
+    }
+    dps_codes = {
+        "ROOM_CLEAN": "168",
+    }
     # Align DP codes/values with field logs (similar to T2267/L60 layout)
     commands = {
         # Pause is applied via MODE DP (152) on this model
@@ -47,9 +58,9 @@ class T2320(RobovacModelDetails):
                 "AggO": "nosweep",
             },
         },
-        # Status reports via DP 153 (base64-encoded status payloads)
+        # Status reports via DP 173 (base64-encoded status payloads)
         RobovacCommand.STATUS: {
-            "code": 153,
+            "code": 173,
             "values": {
                 # Observed when the vacuum is idle at the dock. Without this
                 # mapping Home Assistant would treat the state as cleaning.
@@ -88,16 +99,14 @@ class T2320(RobovacModelDetails):
         RobovacCommand.LOCATE: {
             "code": 160,
         },
-        # Battery level is DP 163
+        # Battery level is DP 172
         RobovacCommand.BATTERY: {
-            "code": 163,
+            "code": 172,
         },
         # Bind a dummy error DP to satisfy plumbing and avoid
         # misclassifying informational payloads as errors.
         # When a reliable error DP is known for this model, update it.
-        RobovacCommand.ERROR: {
-            "code": 0,
-        },
+        RobovacCommand.ERROR: {"code": 169},
     }
 
     activity_mapping = {

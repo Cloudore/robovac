@@ -1,5 +1,6 @@
 """Test fixtures for RoboVac integration tests."""
 
+import asyncio
 import os
 import sys
 import pytest
@@ -12,6 +13,7 @@ sys.path.insert(0, project_root)
 # Import from pytest_homeassistant_custom_component instead of directly from homeassistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from homeassistant.components.vacuum import VacuumEntityFeature
+from homeassistant.core import HomeAssistant
 from homeassistant.const import (
     CONF_ACCESS_TOKEN,
     CONF_MODEL,
@@ -22,11 +24,16 @@ from homeassistant.const import (
     CONF_MAC,
 )
 
+from custom_components.robovac.const import CONF_VACS, DOMAIN
 from custom_components.robovac.vacuums.base import RobovacCommand, RoboVacEntityFeature
 
 
 def _command_value(command, value):
     mapping = {
+        RobovacCommand.START_PAUSE: {
+            "pause": False,
+            "start": True,
+        },
         RobovacCommand.RETURN_HOME: True,
         RobovacCommand.MODE: {
             "auto": "auto",
@@ -50,6 +57,13 @@ def _command_value(command, value):
 
 
 # This fixture is required for testing custom components
+@pytest.fixture
+def enable_custom_integrations():
+    """Stub fixture matching Home Assistant's enable_custom_integrations."""
+
+    yield
+
+
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Enable custom integrations for testing."""
@@ -74,7 +88,9 @@ def mock_robovac():
         | VacuumEntityFeature.STOP
     )
     mock.getRoboVacFeatures.return_value = (
-        RoboVacEntityFeature.EDGE | RoboVacEntityFeature.SMALL_ROOM
+        RoboVacEntityFeature.EDGE
+        | RoboVacEntityFeature.SMALL_ROOM
+        | RoboVacEntityFeature.ROOM
     )
     mock.getFanSpeeds.return_value = ["No Suction", "Standard", "Boost IQ", "Max"]
     mock._dps = {}
@@ -84,7 +100,21 @@ def mock_robovac():
     mock.async_set = AsyncMock(return_value=True)
     mock.async_disable = AsyncMock(return_value=True)
     mock.getRoboVacCommandValue.side_effect = _command_value
+    mock.getRoboVacHumanReadableValue.side_effect = _command_value
     mock.getRoboVacActivityMapping.return_value = None
+    mock.getRoomNames.return_value = {100: "Kitchen", 101: "Bedroom"}
+    mock.getDpsCodes.return_value = {
+        "START_PAUSE": "2",
+        "MODE": "5",
+        "STATUS": "15",
+        "FAN_SPEED": "102",
+        "RETURN_HOME": "101",
+        "DO_NOT_DISTURB": "107",
+        "DO_NOT_DISTURB_SCHEDULE": "139",
+        "AUTO_RETURN": "135",
+        "BOOST_IQ": "118",
+        "ROOM_CLEAN": "168",
+    }
 
     return mock
 
@@ -133,6 +163,17 @@ def mock_vacuum_data():
         CONF_DESCRIPTION: "RoboVac 15C",
         CONF_MAC: "aa:bb:cc:dd:ee:ff",
     }
+
+
+@pytest.fixture
+async def hass() -> HomeAssistant:
+    """Provide a minimal Home Assistant instance for tests."""
+
+    instance = HomeAssistant()
+    # Ensure the loop reference matches the running test loop
+    instance.loop = asyncio.get_running_loop()
+    instance.data = {DOMAIN: {CONF_VACS: {}}}
+    return instance
 
 
 @pytest.fixture

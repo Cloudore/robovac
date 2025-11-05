@@ -2,6 +2,7 @@
 
 DOMAIN = "robovac"
 CONF_VACS = "vacuums"
+CONF_ROOM_NAMES = "room_names"
 CONF_AUTODISCOVERY = "autodiscovery"
 REFRESH_RATE = 60
 PING_RATE = 10

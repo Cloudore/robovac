@@ -52,6 +52,7 @@ class TuyaCodes(StrEnum):
     BATTERY_LEVEL = "104"
     ERROR_CODE = "106"
     DO_NOT_DISTURB = "107"
+    DO_NOT_DISTURB_SCHEDULE = "139"
     CLEANING_TIME = "109"
     CLEANING_AREA = "110"
     BOOST_IQ = "118"
@@ -69,3 +70,4 @@ class RobovacModelDetails(Protocol):
     commands: Dict[RobovacCommand, Any]
     dps_codes: Dict[str, str] = {}  # Optional model-specific DPS codes
     activity_mapping: Dict[str, VacuumActivity] | None = None
+    room_names: Dict[int | str, str] | None = None

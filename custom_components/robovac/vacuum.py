@@ -48,7 +48,7 @@ from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_VACS, DOMAIN, PING_RATE, REFRESH_RATE, TIMEOUT
+from .const import CONF_ROOM_NAMES, CONF_VACS, DOMAIN, PING_RATE, REFRESH_RATE, TIMEOUT
 from .errors import getErrorMessage
 from .vacuums.base import (
     RobovacCommand,
@@ -73,6 +73,7 @@ ATTR_DO_NOT_DISTURB = "do_not_disturb"
 ATTR_BOOST_IQ = "boost_iq"
 ATTR_CONSUMABLES = "consumables"
 ATTR_MODE = "mode"
+ATTR_ROOM_NAMES = "room_names"
 
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=REFRESH_RATE)
@@ -121,6 +122,8 @@ class RoboVacEntity(StateVacuumEntity):
     _attr_activity_mapping: dict[str, VacuumActivity] | None = None
     _attr_error_code: int | str | None = None
     _attr_tuya_state: int | str | None = None
+    _attr_room_names: dict[int, str] | None = None
+    _room_name_lookup: dict[str, int]
 
     @property
     def robovac_supported(self) -> int | None:
@@ -349,6 +352,13 @@ class RoboVacEntity(StateVacuumEntity):
             # If the state looks like an unmapped base64 payload, default to
             # an idle activity instead of incorrectly reporting cleaning.
             if isinstance(self._attr_tuya_state, str):
+                normalized_state = self._attr_tuya_state.strip().lower()
+                if normalized_state in {
+                    "cleaning",
+                    "auto cleaning",
+                    "room cleaning",
+                }:
+                    return VacuumActivity.CLEANING
                 try:
                     base64.b64decode(self._attr_tuya_state, validate=True)
                     _LOGGER.debug(
@@ -415,6 +425,12 @@ class RoboVacEntity(StateVacuumEntity):
             data[ATTR_CONSUMABLES] = self.consumables
         if self.mode:
             data[ATTR_MODE] = self.mode
+        if (
+            self.robovac_supported is not None
+            and self.robovac_supported & RoboVacEntityFeature.ROOM
+            and self._attr_room_names
+        ):
+            data[ATTR_ROOM_NAMES] = self._attr_room_names
         return data
 
     def __init__(self, item: dict[str, Any]) -> None:
@@ -447,6 +463,9 @@ class RoboVacEntity(StateVacuumEntity):
         # Track last-known mode and timing for return-to-dock heuristic
         self._last_mode_value: str | None = None
         self._last_return_ts: float | None = None
+        self._attr_room_names = None
+        self._room_name_lookup = {}
+        configured_room_names = item.get(CONF_ROOM_NAMES)
 
         # Initialize the RoboVac connection
         try:
@@ -488,6 +507,7 @@ class RoboVacEntity(StateVacuumEntity):
             self._attr_robovac_supported = self.vacuum.getRoboVacFeatures()
             self._attr_activity_mapping = self.vacuum.getRoboVacActivityMapping()
             self._attr_fan_speed_list = self.vacuum.getFanSpeeds()
+            self._initialize_room_names(configured_room_names)
 
             _LOGGER.debug(
                 "Vacuum %s supports features: %s",
@@ -503,6 +523,7 @@ class RoboVacEntity(StateVacuumEntity):
                 "Vacuum %s initialization failed, features not available",
                 self._attr_name,
             )
+            self._initialize_room_names(configured_room_names)
 
         # Initialize additional attributes
         self._attr_mode = None
@@ -727,6 +748,114 @@ class RoboVacEntity(StateVacuumEntity):
         # Fall back to default codes
         return TUYA_CONSUMABLES_CODES
 
+    def _initialize_room_names(self, configured: Any) -> None:
+        """Combine configured and model-provided room names into a lookup map."""
+
+        mapping: dict[int, str] = {}
+
+        if isinstance(configured, dict):
+            for key, name in configured.items():
+                room_id = self._parse_room_identifier(key)
+                label = name.strip() if isinstance(name, str) else None
+                if room_id is not None and label:
+                    mapping[room_id] = label
+
+        if self.vacuum is not None:
+            builtin = self.vacuum.getRoomNames()
+            if isinstance(builtin, dict):
+                for key, name in builtin.items():
+                    room_id = self._parse_room_identifier(key)
+                    label = name.strip() if isinstance(name, str) else None
+                    if room_id is not None and label and room_id not in mapping:
+                        mapping[room_id] = label
+
+        if mapping:
+            self._attr_room_names = mapping
+            self._room_name_lookup = {}
+            for room_id, label in mapping.items():
+                normalized = self._normalize_room_name(label)
+                if normalized is not None:
+                    self._room_name_lookup[normalized] = room_id
+        else:
+            self._attr_room_names = None
+            self._room_name_lookup = {}
+
+    @staticmethod
+    def _normalize_room_name(name: Any) -> str | None:
+        """Normalize a room name for comparison."""
+
+        if not isinstance(name, str):
+            return None
+
+        stripped = name.strip()
+        return stripped.casefold() if stripped else None
+
+    @staticmethod
+    def _parse_room_identifier(value: Any) -> int | None:
+        """Convert a user-supplied identifier to an integer room id."""
+
+        if isinstance(value, int):
+            return value
+
+        try:
+            text = str(value).strip()
+            if not text:
+                return None
+            return int(text)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _iter_room_values(value: Any) -> list[Any]:
+        """Return a list of values regardless of the input type."""
+
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            return list(value)
+        return [value]
+
+    def _resolve_room_ids(self, room_ids: Any, room_names: Any) -> list[int]:
+        """Resolve a mix of ids and names into numeric room identifiers."""
+
+        resolved: list[int] = []
+
+        for candidate in self._iter_room_values(room_ids):
+            room_id = self._parse_room_identifier(candidate)
+            if room_id is not None:
+                resolved.append(room_id)
+                continue
+
+            normalized = self._normalize_room_name(candidate)
+            if normalized is None:
+                continue
+            lookup = self._room_name_lookup.get(normalized)
+            if lookup is not None:
+                resolved.append(lookup)
+
+        if not resolved and room_names is not None:
+            for name in self._iter_room_values(room_names):
+                normalized = self._normalize_room_name(name)
+                if normalized is None:
+                    continue
+                lookup = self._room_name_lookup.get(normalized)
+                if lookup is not None:
+                    resolved.append(lookup)
+                else:
+                    _LOGGER.warning("Unknown room name '%s'", name)
+
+        if not resolved:
+            return [1]
+
+        unique: list[int] = []
+        seen: set[int] = set()
+        for room_id in resolved:
+            if room_id not in seen:
+                unique.append(room_id)
+                seen.add(room_id)
+
+        return unique
+
     def _update_battery_level(self) -> None:
         """Update the battery level attribute."""
         if self.tuyastatus is None:
@@ -757,9 +886,12 @@ class RoboVacEntity(StateVacuumEntity):
 
         # Update state attribute
         if tuya_state is not None and self.vacuum is not None:
-            self._attr_tuya_state = self.vacuum.getRoboVacHumanReadableValue(
+            translated_state = self.vacuum.getRoboVacHumanReadableValue(
                 RobovacCommand.STATUS, tuya_state
             )
+            if not isinstance(translated_state, str):
+                translated_state = str(tuya_state)
+            self._attr_tuya_state = translated_state
             _LOGGER.debug(
                 "in _update_state_and_error, tuya_state: %s, self._attr_tuya_state: %s.",
                 tuya_state,
@@ -774,9 +906,12 @@ class RoboVacEntity(StateVacuumEntity):
 
         # Update error code attribute
         if error_code is not None and self.vacuum is not None:
-            self._attr_error_code = self.vacuum.getRoboVacHumanReadableValue(
+            translated_error = self.vacuum.getRoboVacHumanReadableValue(
                 RobovacCommand.ERROR, error_code
             )
+            if not isinstance(translated_error, (str, int)):
+                translated_error = error_code
+            self._attr_error_code = translated_error
             _LOGGER.debug(
                 "in _update_state_and_error, error_code: %s, self._attr_error_code: %s.",
                 error_code,
@@ -797,9 +932,12 @@ class RoboVacEntity(StateVacuumEntity):
         # Update mode attribute
         if mode is not None and self.vacuum is not None:
             previous_mode = self._attr_mode
-            self._attr_mode = self.vacuum.getRoboVacHumanReadableValue(
+            translated_mode = self.vacuum.getRoboVacHumanReadableValue(
                 RobovacCommand.MODE, mode
             )
+            if not isinstance(translated_mode, str):
+                translated_mode = str(mode)
+            self._attr_mode = translated_mode
             self._last_mode_value = self._attr_mode
             # Record when we entered return mode so we can flip to docked
             # if the device doesn't provide an explicit charging status token.
@@ -1049,6 +1187,10 @@ class RoboVacEntity(StateVacuumEntity):
         elif command == "doNotDisturb":
             # Toggle the do not disturb setting
             new_value = not self._is_value_true(self.do_not_disturb)
+            schedule_code = self._get_dps_code("DO_NOT_DISTURB_SCHEDULE")
+            if schedule_code:
+                schedule_value = "MTAwMDAwMDAw" if new_value else "MEQ4MDAwMDAw"
+                await self.vacuum.async_set({schedule_code: schedule_value})
             await self.vacuum.async_set(
                 {self._get_dps_code("DO_NOT_DISTURB"): new_value}
             )
@@ -1057,7 +1199,9 @@ class RoboVacEntity(StateVacuumEntity):
             new_value = not self._is_value_true(self.boost_iq)
             await self.vacuum.async_set({self._get_dps_code("BOOST_IQ"): new_value})
         elif command == "roomClean" and params is not None and isinstance(params, dict):
-            room_ids = params.get("roomIds", [1])
+            room_ids = self._resolve_room_ids(
+                params.get("roomIds"), params.get("roomNames")
+            )
             count = params.get("count", 1)
             clean_request = {"roomIds": room_ids, "cleanTimes": count}
             method_call = {
@@ -1068,7 +1212,11 @@ class RoboVacEntity(StateVacuumEntity):
             json_str = json.dumps(method_call, separators=(",", ":"))
             base64_str = base64.b64encode(json_str.encode("utf8")).decode("utf8")
             _LOGGER.debug("roomClean call %s", json_str)
-            await self.vacuum.async_set({TuyaCodes.ROOM_CLEAN: base64_str})
+            dps_code = self._get_dps_code("ROOM_CLEAN")
+            if not dps_code:
+                _LOGGER.error("ROOM_CLEAN DPS code unavailable; cannot run room clean")
+                return
+            await self.vacuum.async_set({dps_code: base64_str})
 
     async def async_will_remove_from_hass(self) -> None:
         """Handle removal from Home Assistant."""
