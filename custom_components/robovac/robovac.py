@@ -1,7 +1,7 @@
 from typing import Any, cast
 from collections.abc import Mapping
+from homeassistant.components.vacuum import VacuumActivity
 
-from .ha_vacuum_activity import VacuumActivity
 from .tuyalocalapi import TuyaDevice
 from .vacuums import ROBOVAC_MODELS
 from .vacuums.base import RobovacCommand, RobovacModelDetails
@@ -147,10 +147,7 @@ class RoboVac(TuyaDevice):
             # All others use the same code names
         }
 
-        codes: dict[str, str] = {}
-        model_specific_codes = getattr(self.model_details, "dps_codes", None)
-        if isinstance(model_specific_codes, Mapping):
-            codes.update({str(key): str(value) for key, value in model_specific_codes.items()})
+        codes = {}
         # Extract codes from commands dictionary
         for key, value in self.model_details.commands.items():
             # Get the DPS name from the mapping, or use the command name if not in mapping

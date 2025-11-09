@@ -25,7 +25,7 @@ from .const import CONF_VACS, DOMAIN
 
 from .tuyalocaldiscovery import TuyaLocalDiscovery
 
-PLATFORMS = [Platform.VACUUM, Platform.SENSOR, Platform.SELECT]
+PLATFORMS = [Platform.VACUUM, Platform.SENSOR]
 _LOGGER = logging.getLogger(__name__)
 
 

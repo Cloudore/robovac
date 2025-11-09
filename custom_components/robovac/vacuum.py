@@ -26,10 +26,11 @@ from enum import StrEnum
 import json
 import logging
 import time
-from typing import Any, Callable
+from typing import Any
 
 from homeassistant.components.vacuum import (
     StateVacuumEntity,
+    VacuumActivity,
     VacuumEntityFeature,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -46,10 +47,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import CONF_ROOM_NAMES, CONF_VACS, DOMAIN, PING_RATE, REFRESH_RATE, TIMEOUT
-from .ha_vacuum_activity import VacuumActivity
+from .const import CONF_VACS, DOMAIN, PING_RATE, REFRESH_RATE, TIMEOUT
 from .errors import getErrorMessage
 from .vacuums.base import (
     RobovacCommand,
@@ -58,7 +57,6 @@ from .vacuums.base import (
     TUYA_CONSUMABLES_CODES,
 )
 from .robovac import ModelNotSupportedException, RoboVac
-from .room_payload import decode_binary_room_list
 from .tuyalocalapi import TuyaException
 
 ATTR_BATTERY_ICON = "battery_icon"
@@ -76,23 +74,9 @@ ATTR_BOOST_IQ = "boost_iq"
 ATTR_CONSUMABLES = "consumables"
 ATTR_MODE = "mode"
 
-ROOM_NAME_SOURCE_DEVICE = "device"
-ROOM_NAME_SOURCE_USER = "user"
-
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=REFRESH_RATE)
 UPDATE_RETRIES = 3
-
-
-# Known room clean payloads that map to human-friendly room labels.
-# These values are captured from real devices that emit non-JSON payloads
-# for DP 168 updates. The mapping helps surface friendly labels when the
-# payload format cannot be decoded dynamically.
-KNOWN_ROOM_PAYLOAD_LABELS: dict[str, dict[str, str | None]] = {
-    "KAomCgIIZBIDCI4CGgMIjgIiAghkKgIIZDIDCJ4BoAG4x7Lu/9HAuhg=": {
-        "100": "Living Room",
-    }
-}
 
 
 async def async_setup_entry(
@@ -109,7 +93,7 @@ async def async_setup_entry(
         async_add_entities([entity])
 
 
-class RoboVacEntity(RestoreEntity, StateVacuumEntity):
+class RoboVacEntity(StateVacuumEntity):
     """Home Assistant vacuum entity for Tuya-based robotic vacuum cleaners.
 
     This class implements the Home Assistant VacuumEntity interface for controlling
@@ -365,17 +349,15 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             # If the state looks like an unmapped base64 payload, default to
             # an idle activity instead of incorrectly reporting cleaning.
             if isinstance(self._attr_tuya_state, str):
-                state_text = self._attr_tuya_state
-                if not state_text.isalpha():
-                    try:
-                        base64.b64decode(state_text, validate=True)
-                        _LOGGER.debug(
-                            "Unmapped base64 state %s - assuming idle",
-                            state_text,
-                        )
-                        return VacuumActivity.IDLE
-                    except binascii.Error:
-                        pass
+                try:
+                    base64.b64decode(self._attr_tuya_state, validate=True)
+                    _LOGGER.debug(
+                        "Unmapped base64 state %s - assuming idle",
+                        self._attr_tuya_state,
+                    )
+                    return VacuumActivity.IDLE
+                except binascii.Error:
+                    pass
             return VacuumActivity.CLEANING
 
     @property
@@ -431,35 +413,9 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             and self.consumables
         ):
             data[ATTR_CONSUMABLES] = self.consumables
-        if self._attr_room_names:
-            data["room_names"] = {
-                key: dict(value) for key, value in self._attr_room_names.items()
-            }
         if self.mode:
             data[ATTR_MODE] = self.mode
-
-        if self._attr_room_names:
-            robot_vacuum_rooms = {
-                key: dict(value) for key, value in self._attr_room_names.items()
-            }
-            data.setdefault("robot_vacuum", {})["rooms"] = robot_vacuum_rooms
         return data
-
-    @property
-    def capability_attributes(self) -> dict[str, Any]:
-        """Expose capability metadata for the vacuum entity."""
-
-        base = super().capability_attributes or {}
-        attributes = dict(base)
-
-        if self._attr_room_names:
-            rooms = [
-                {"key": key, **dict(value)}
-                for key, value in self._attr_room_names.items()
-            ]
-            attributes.setdefault("robot_vacuum", {})["rooms"] = rooms
-
-        return attributes
 
     def __init__(self, item: dict[str, Any]) -> None:
         """Initialize the RoboVac vacuum entity.
@@ -491,10 +447,6 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
         # Track last-known mode and timing for return-to-dock heuristic
         self._last_mode_value: str | None = None
         self._last_return_ts: float | None = None
-        self._room_name_registry: dict[str, dict[str, Any]] = {}
-        self._room_name_overrides: dict[str, str] = {}
-        self._room_name_listeners: list[Callable[[], None]] = []
-        self._attr_room_names: dict[str, dict[str, Any]] | None = None
 
         # Initialize the RoboVac connection
         try:
@@ -556,26 +508,6 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
         self._attr_mode = None
         self._attr_consumables = None
 
-        overrides = item.get(CONF_ROOM_NAMES)
-        if isinstance(overrides, dict):
-            for key, value in overrides.items():
-                if value is None:
-                    continue
-                label = str(value).strip()
-                if not label:
-                    continue
-                key_str = str(key)
-                self._room_name_overrides[key_str] = label
-                self._room_name_registry[key_str] = {
-                    "id": self._coerce_room_identifier(key),
-                    "key": key_str,
-                    "label": label,
-                    "room_name": label,
-                    "source": ROOM_NAME_SOURCE_USER,
-                }
-
-        self._refresh_room_names_attr()
-
         # Set up device info for Home Assistant device registry
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, item[CONF_ID])},
@@ -592,10 +524,6 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
 
         Trigger an immediate state fetch to avoid prolonged initial Unknown state.
         """
-        await super().async_added_to_hass()
-
-        await self._restore_cached_room_names()
-
         try:
             # First attempt at fetching state
             await self.async_update()
@@ -751,7 +679,6 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
 
         # Update model-specific attributes
         self._update_cleaning_stats()
-        self._update_room_names()
 
     def _get_dps_code(self, code_name: str) -> str:
         """Get the DPS code for a specific function.
@@ -961,269 +888,6 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
                                 "Failed to decode consumable data: %s", str(e)
                             )
 
-    def _deserialize_room_cache_entry(
-        self, key: Any, value: Any
-    ) -> tuple[str, dict[str, Any]] | None:
-        """Convert persisted room cache values into registry entries."""
-
-        if not isinstance(value, dict):
-            return None
-
-        identifier = value.get("id", key)
-        key_value: Any = value.get("key")
-        if identifier is None:
-            identifier = key_value if key_value is not None else key
-        if identifier is None:
-            return None
-
-        if key_value is None:
-            key_value = identifier
-        if key_value is None:
-            return None
-
-        key_str = str(key_value)
-
-        entry: dict[str, Any] = {
-            "id": self._coerce_room_identifier(identifier),
-            "key": key_str,
-        }
-
-        label = value.get("label") or value.get("room_name") or value.get("name")
-        if isinstance(label, str):
-            label = label.strip()
-        elif label is not None:
-            label = str(label).strip()
-
-        if label:
-            entry["label"] = label
-            entry["room_name"] = label
-
-        device_label = value.get("device_label")
-        if isinstance(device_label, str):
-            device_label = device_label.strip()
-        elif device_label is not None:
-            device_label = str(device_label).strip()
-
-        if device_label:
-            entry["device_label"] = device_label
-        elif label:
-            entry["device_label"] = label
-
-        source = value.get("source")
-        if source in (ROOM_NAME_SOURCE_DEVICE, ROOM_NAME_SOURCE_USER):
-            entry["source"] = source
-        elif label:
-            entry["source"] = ROOM_NAME_SOURCE_DEVICE
-
-        return key_str, entry
-
-    @staticmethod
-    def _coerce_room_identifier(identifier: Any) -> Any:
-        """Convert a room identifier to int when possible."""
-
-        if isinstance(identifier, int):
-            return identifier
-        if isinstance(identifier, str):
-            stripped = identifier.strip()
-            try:
-                return int(stripped)
-            except ValueError:
-                return stripped
-        return identifier
-
-    def _store_room_name(self, identifier: Any, label: str | None) -> None:
-        """Persist a discovered room name entry."""
-
-        if identifier is None:
-            return
-
-        key = str(identifier)
-        entry = self._room_name_registry.get(key, {})
-        entry["id"] = self._coerce_room_identifier(identifier)
-        entry.setdefault("key", key)
-
-        if label:
-            entry["device_label"] = label
-            if entry.get("source") != ROOM_NAME_SOURCE_USER:
-                entry["label"] = label
-                entry["room_name"] = label
-                entry["source"] = ROOM_NAME_SOURCE_DEVICE
-        elif entry.get("source") is None:
-            entry["source"] = ROOM_NAME_SOURCE_DEVICE
-
-        self._room_name_registry[key] = entry
-
-    def _apply_room_name_overrides(self) -> None:
-        """Apply configured overrides to the discovered room names."""
-
-        for key, label in self._room_name_overrides.items():
-            entry = self._room_name_registry.setdefault(
-                key,
-                {
-                    "id": self._coerce_room_identifier(key),
-                    "key": key,
-                },
-            )
-            entry["label"] = label
-            entry["room_name"] = label
-            entry["source"] = ROOM_NAME_SOURCE_USER
-
-    def add_room_name_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
-        """Register a callback that fires when room metadata changes."""
-
-        self._room_name_listeners.append(listener)
-
-        def _remove_listener() -> None:
-            try:
-                self._room_name_listeners.remove(listener)
-            except ValueError:
-                pass
-
-        return _remove_listener
-
-    def _notify_room_name_listeners(self) -> None:
-        """Notify listeners that room metadata has been refreshed."""
-
-        if not self._room_name_listeners:
-            return
-
-        listeners = list(self._room_name_listeners)
-        if self.hass is not None:
-            for callback in listeners:
-                self.hass.loop.call_soon(callback)
-        else:
-            for callback in listeners:
-                callback()
-
-    def _refresh_room_names_attr(self) -> None:
-        """Expose the current room name registry via the entity attribute."""
-
-        previous = self._attr_room_names
-        if self._room_name_registry:
-            self._attr_room_names = {
-                key: dict(value) for key, value in self._room_name_registry.items()
-            }
-        else:
-            self._attr_room_names = None
-
-        if previous != self._attr_room_names:
-            self._notify_room_name_listeners()
-
-    def _update_room_names(self) -> None:
-        """Decode any room metadata embedded in the room clean DPS payload."""
-
-        if self.tuyastatus is None or self.vacuum is None:
-            return
-
-        room_clean_code = self._get_dps_code("ROOM_CLEAN")
-        if not room_clean_code:
-            room_clean_code = TuyaCodes.ROOM_CLEAN
-
-        payload = self.tuyastatus.get(room_clean_code)
-        if not payload or not isinstance(payload, str):
-            return
-
-        updated = False
-
-        known_mapping = KNOWN_ROOM_PAYLOAD_LABELS.get(payload)
-        if known_mapping:
-            for identifier, label in known_mapping.items():
-                self._store_room_name(identifier, label)
-            updated = True
-
-        decoded: bytes | None = None
-        try:
-            decoded = base64.b64decode(payload, validate=True)
-        except (binascii.Error, ValueError):
-            decoded = None
-
-        json_updated = False
-        if decoded:
-            decoded_text: str | None = None
-            try:
-                decoded_text = decoded.decode("utf-8")
-            except UnicodeDecodeError:
-                decoded_text = None
-
-            message: Any = None
-            if decoded_text:
-                try:
-                    message = json.loads(decoded_text)
-                except (TypeError, ValueError):
-                    message = None
-
-            if isinstance(message, dict):
-                data = (
-                    message.get("data") if isinstance(message.get("data"), dict) else None
-                )
-
-                candidate_lists: list[list[Any]] = []
-                for container in filter(None, [data, message]):
-                    if not isinstance(container, dict):
-                        continue
-                    for key in (
-                        "rooms",
-                        "roomList",
-                        "roomInfos",
-                        "roomInfoList",
-                        "multiMapRooms",
-                        "mapRooms",
-                    ):
-                        value = container.get(key)
-                        if isinstance(value, list):
-                            candidate_lists.append(value)
-
-                rooms = next((value for value in candidate_lists if value), None)
-                if rooms:
-                    for room in rooms:
-                        if not isinstance(room, dict):
-                            continue
-
-                        identifier = (
-                            room.get("roomId")
-                            or room.get("roomID")
-                            or room.get("id")
-                            or room.get("mapRoomId")
-                            or room.get("room_id")
-                        )
-                        if identifier is None:
-                            continue
-
-                        raw_label = (
-                            room.get("roomName")
-                            or room.get("name")
-                            or room.get("label")
-                            or room.get("room_name")
-                        )
-                        label = None
-                        if isinstance(raw_label, str):
-                            label = raw_label.strip()
-                        elif raw_label is not None:
-                            label = str(raw_label).strip()
-
-                        self._store_room_name(identifier, label if label else None)
-                        json_updated = True
-
-            if not (updated or json_updated):
-                if self._decode_binary_room_payload(decoded):
-                    updated = True
-            elif json_updated:
-                updated = True
-        elif updated:
-            # Known mapping already applied; nothing further to decode.
-            pass
-
-        if not updated and decoded:
-            if self._decode_binary_room_payload(decoded):
-                updated = True
-
-        if updated:
-            try:
-                self._apply_room_name_overrides()
-                self._refresh_room_names_attr()
-            except Exception:  # pragma: no cover - defensive guard
-                _LOGGER.exception("Failed to finalize room name update")
-
     async def async_locate(self, **kwargs: Any) -> None:
         """Locate the vacuum cleaner.
 
@@ -1404,10 +1068,7 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             json_str = json.dumps(method_call, separators=(",", ":"))
             base64_str = base64.b64encode(json_str.encode("utf8")).decode("utf8")
             _LOGGER.debug("roomClean call %s", json_str)
-            room_clean_code = self._get_dps_code("ROOM_CLEAN")
-            if not room_clean_code:
-                room_clean_code = TuyaCodes.ROOM_CLEAN
-            await self.vacuum.async_set({room_clean_code: base64_str})
+            await self.vacuum.async_set({TuyaCodes.ROOM_CLEAN: base64_str})
 
     async def async_will_remove_from_hass(self) -> None:
         """Handle removal from Home Assistant."""

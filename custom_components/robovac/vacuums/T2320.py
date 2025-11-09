@@ -1,7 +1,5 @@
 """Eufy Robot Vacuum and Mop X9 Pro with Auto-Clean Station (T2320)"""
-from homeassistant.components.vacuum import VacuumEntityFeature
-
-from ..ha_vacuum_activity import VacuumActivity
+from homeassistant.components.vacuum import VacuumEntityFeature, VacuumActivity
 from .base import RoboVacEntityFeature, RobovacCommand, RobovacModelDetails
 
 
@@ -20,9 +18,7 @@ class T2320(RobovacModelDetails):
     robovac_features = (
         RoboVacEntityFeature.DO_NOT_DISTURB
         | RoboVacEntityFeature.BOOST_IQ
-        | RoboVacEntityFeature.ROOM
     )
-    dps_codes = {"ROOM_CLEAN": "168"}
     # Align DP codes/values with field logs (similar to T2267/L60 layout)
     commands = {
         # Pause is applied via MODE DP (152) on this model
