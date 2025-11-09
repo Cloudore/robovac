@@ -1,11 +1,58 @@
 """Tests for the RoboVac vacuum entity."""
 
+import base64
+import json
+
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 from homeassistant.components.vacuum import VacuumActivity
+from homeassistant.core import State
+from custom_components.robovac.const import CONF_ROOM_NAMES
 from custom_components.robovac.vacuum import RoboVacEntity
 from custom_components.robovac.vacuums.base import TuyaCodes
+
+
+def _encode_varint(value: int) -> bytes:
+    buffer = bytearray()
+    remaining = value
+    while True:
+        to_write = remaining & 0x7F
+        remaining >>= 7
+        if remaining:
+            buffer.append(to_write | 0x80)
+        else:
+            buffer.append(to_write)
+            break
+    return bytes(buffer)
+
+
+def _encode_length_delimited(field_number: int, payload: bytes) -> bytes:
+    tag = (field_number << 3) | 2
+    return bytes([tag]) + _encode_varint(len(payload)) + payload
+
+
+@pytest.fixture
+def binary_room_payload() -> dict[str, object]:
+    """Construct a binary room payload with two entries."""
+
+    def build_room(room_id: int, name: str) -> bytes:
+        identifier = _encode_length_delimited(1, b"\x08" + _encode_varint(room_id))
+        label = _encode_length_delimited(6, _encode_length_delimited(2, name.encode()))
+        return identifier + label
+
+    rooms = [
+        (2, "Kitchen"),
+        (5, "Office"),
+    ]
+    room_entries = b"".join(
+        _encode_length_delimited(1, build_room(room_id, name)) for room_id, name in rooms
+    )
+    payload = _encode_varint(len(room_entries)) + room_entries
+    return {
+        "payload": base64.b64encode(payload).decode("utf-8"),
+        "rooms": rooms,
+    }
 
 
 @pytest.mark.asyncio
@@ -208,3 +255,82 @@ async def test_fan_speed_formatting(mock_robovac, mock_vacuum_data):
             assert (
                 entity._attr_fan_speed == expected_output
             ), f"Failed for input: {input_speed}"
+
+
+@pytest.mark.asyncio
+async def test_update_entity_values_decodes_room_names(mock_robovac, mock_vacuum_data):
+    """Room metadata embedded in the room clean DPS is decoded into labels."""
+
+    mock_robovac.getDpsCodes.return_value = {"ROOM_CLEAN": "168"}
+    room_payload = base64.b64encode(
+        json.dumps(
+            {
+                "method": "syncMultiMapRoomList",
+                "data": {
+                    "rooms": [
+                        {"roomId": 1, "roomName": "Kitchen"},
+                        {"roomId": 3, "label": "Bedroom"},
+                        {"roomId": "uuid-4", "name": "Office"},
+                    ]
+                },
+            }
+        ).encode("utf-8")
+    ).decode("utf-8")
+    mock_robovac._dps = {"168": room_payload}
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+        entity.update_entity_values()
+
+    assert entity._attr_room_names is not None
+    assert entity._attr_room_names["1"]["label"] == "Kitchen"
+    assert entity._attr_room_names["1"]["device_label"] == "Kitchen"
+    assert entity._attr_room_names["1"]["source"] == "device"
+    assert entity._attr_room_names["1"]["key"] == "1"
+    assert entity._attr_room_names["3"]["label"] == "Bedroom"
+    assert entity._attr_room_names["3"]["source"] == "device"
+    assert entity._attr_room_names["uuid-4"]["label"] == "Office"
+    assert entity._attr_room_names["uuid-4"]["source"] == "device"
+
+
+@pytest.mark.asyncio
+async def test_room_name_overrides_take_precedence(mock_robovac, mock_vacuum_data):
+    """Configured overrides replace discovered room labels."""
+
+    mock_vacuum_data[CONF_ROOM_NAMES] = {"3": "Guest Room"}
+    mock_robovac.getDpsCodes.return_value = {"ROOM_CLEAN": "168"}
+    room_payload = base64.b64encode(
+        json.dumps(
+            {
+                "method": "syncMultiMapRoomList",
+                "data": {"rooms": [{"roomId": 3, "roomName": "Bedroom"}]},
+            }
+        ).encode("utf-8")
+    ).decode("utf-8")
+    mock_robovac._dps = {"168": room_payload}
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+        entity.update_entity_values()
+
+    assert entity._attr_room_names is not None
+    assert entity._attr_room_names["3"]["label"] == "Guest Room"
+
+
+@pytest.mark.asyncio
+async def test_extra_state_attributes_include_room_names(
+    mock_robovac, mock_vacuum_data
+) -> None:
+    """Room metadata is exposed via extra state attributes for other platforms."""
+
+    mock_robovac.getDpsCodes.return_value = {"ROOM_CLEAN": "168"}
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+
+    entity._room_name_registry["1"] = {"id": 1, "label": "Living Room"}
+    entity._refresh_room_names_attr()
+
+    attributes = entity.extra_state_attributes
+    assert "room_names" in attributes
+    assert attributes["room_names"]["1"]["label"] == "Living Room"
