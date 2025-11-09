@@ -30,7 +30,6 @@ from typing import Any, Callable
 
 from homeassistant.components.vacuum import (
     StateVacuumEntity,
-    VacuumActivity,
     VacuumEntityFeature,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -50,6 +49,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import CONF_ROOM_NAMES, CONF_VACS, DOMAIN, PING_RATE, REFRESH_RATE, TIMEOUT
+from .ha_vacuum_activity import VacuumActivity
 from .errors import getErrorMessage
 from .vacuums.base import (
     RobovacCommand,
