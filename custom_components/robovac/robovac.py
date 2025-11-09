@@ -1,7 +1,7 @@
 from typing import Any, cast
 from collections.abc import Mapping
-from homeassistant.components.vacuum import VacuumActivity
 
+from .ha_vacuum_activity import VacuumActivity
 from .tuyalocalapi import TuyaDevice
 from .vacuums import ROBOVAC_MODELS
 from .vacuums.base import RobovacCommand, RobovacModelDetails

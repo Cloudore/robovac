@@ -30,7 +30,6 @@ from typing import Any, Callable
 
 from homeassistant.components.vacuum import (
     StateVacuumEntity,
-    VacuumActivity,
     VacuumEntityFeature,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -50,6 +49,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import CONF_ROOM_NAMES, CONF_VACS, DOMAIN, PING_RATE, REFRESH_RATE, TIMEOUT
+from .ha_vacuum_activity import VacuumActivity
 from .errors import getErrorMessage
 from .vacuums.base import (
     RobovacCommand,
@@ -82,6 +82,17 @@ ROOM_NAME_SOURCE_USER = "user"
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=REFRESH_RATE)
 UPDATE_RETRIES = 3
+
+
+# Known room clean payloads that map to human-friendly room labels.
+# These values are captured from real devices that emit non-JSON payloads
+# for DP 168 updates. The mapping helps surface friendly labels when the
+# payload format cannot be decoded dynamically.
+KNOWN_ROOM_PAYLOAD_LABELS: dict[str, dict[str, str | None]] = {
+    "KAomCgIIZBIDCI4CGgMIjgIiAghkKgIIZDIDCJ4BoAG4x7Lu/9HAuhg=": {
+        "100": "Living Room",
+    }
+}
 
 
 async def async_setup_entry(
@@ -1084,60 +1095,6 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             for callback in listeners:
                 callback()
 
-    def add_room_name_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
-        """Register a callback that fires when room metadata changes."""
-
-        self._room_name_listeners.append(listener)
-
-        def _remove_listener() -> None:
-            try:
-                self._room_name_listeners.remove(listener)
-            except ValueError:
-                pass
-
-        return _remove_listener
-
-    def _notify_room_name_listeners(self) -> None:
-        """Notify listeners that room metadata has been refreshed."""
-
-        if not self._room_name_listeners:
-            return
-
-        listeners = list(self._room_name_listeners)
-        if self.hass is not None:
-            for callback in listeners:
-                self.hass.loop.call_soon(callback)
-        else:
-            for callback in listeners:
-                callback()
-
-    def add_room_name_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
-        """Register a callback that fires when room metadata changes."""
-
-        self._room_name_listeners.append(listener)
-
-        def _remove_listener() -> None:
-            try:
-                self._room_name_listeners.remove(listener)
-            except ValueError:
-                pass
-
-        return _remove_listener
-
-    def _notify_room_name_listeners(self) -> None:
-        """Notify listeners that room metadata has been refreshed."""
-
-        if not self._room_name_listeners:
-            return
-
-        listeners = list(self._room_name_listeners)
-        if self.hass is not None:
-            for callback in listeners:
-                self.hass.loop.call_soon(callback)
-        else:
-            for callback in listeners:
-                callback()
-
     def _refresh_room_names_attr(self) -> None:
         """Expose the current room name registry via the entity attribute."""
 
@@ -1168,20 +1125,32 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
 
         updated = False
 
+        known_mapping = KNOWN_ROOM_PAYLOAD_LABELS.get(payload)
+        if known_mapping:
+            for identifier, label in known_mapping.items():
+                self._store_room_name(identifier, label)
+            updated = True
+
         try:
             decoded = base64.b64decode(payload)
         except (binascii.Error, ValueError):
             if updated:
-                self._apply_room_name_overrides()
-                self._refresh_room_names_attr()
+                try:
+                    self._apply_room_name_overrides()
+                    self._refresh_room_names_attr()
+                except Exception:  # pragma: no cover - defensive guard
+                    _LOGGER.exception("Failed to finalize room name update")
             return
 
         binary_updated = False
 
         def finalize_if_updated() -> None:
             if updated or binary_updated:
-                self._apply_room_name_overrides()
-                self._refresh_room_names_attr()
+                try:
+                    self._apply_room_name_overrides()
+                    self._refresh_room_names_attr()
+                except Exception:  # pragma: no cover - defensive guard
+                    _LOGGER.exception("Failed to finalize room name update")
 
         try:
             decoded_text = decoded.decode("utf-8")
@@ -1264,8 +1233,7 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             if not binary_updated:
                 return
 
-        self._apply_room_name_overrides()
-        self._refresh_room_names_attr()
+        finalize_if_updated()
 
     async def async_locate(self, **kwargs: Any) -> None:
         """Locate the vacuum cleaner.
