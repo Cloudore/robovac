@@ -357,6 +357,26 @@ async def test_known_binary_payload_mapping(mock_robovac, mock_vacuum_data):
 
 
 @pytest.mark.asyncio
+async def test_known_binary_payload_mapping_bytes(mock_robovac, mock_vacuum_data):
+    """Known payloads sent as bytes are mapped to friendly room labels."""
+
+    mock_robovac.getDpsCodes.return_value = {"ROOM_CLEAN": "168"}
+    mock_robovac._dps = {
+        "168": base64.b64decode("KAomCgIIZBIDCI4CGgMIjgIiAghkKgIIZDIDCJ4BoAG4x7Lu/9HAuhg="),
+    }
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+        entity.update_entity_values()
+
+    assert entity._attr_room_names is not None
+    entry = entity._attr_room_names["100"]
+    assert entry["id"] == 100
+    assert entry["label"] == "Living Room"
+    assert entry["source"] == "device"
+
+
+@pytest.mark.asyncio
 async def test_binary_room_payload_decoding(
     mock_robovac, mock_vacuum_data, binary_room_payload
 ):
