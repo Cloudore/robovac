@@ -388,3 +388,47 @@ async def test_binary_room_payload_decoding(
         matching = [room for room in capability_rooms if room.get("id") == identifier]
         assert matching
         assert matching[0]["label"] == label
+
+
+@pytest.mark.asyncio
+async def test_room_registry_restored_on_startup(
+    hass, mock_robovac, mock_vacuum_data
+) -> None:
+    """Cached room metadata is restored before the initial update."""
+
+    mock_robovac.getDpsCodes.return_value = {"ROOM_CLEAN": "168"}
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+
+    last_state = State(
+        "vacuum.test_vacuum",
+        "docked",
+        {
+            "room_names": {
+                "7": {
+                    "id": 7,
+                    "label": "Restored Kitchen",
+                    "device_label": "Kitchen",
+                    "source": "device",
+                }
+            }
+        },
+    )
+
+    entity.hass = hass
+
+    with patch.object(entity, "async_get_last_state", return_value=last_state), patch.object(
+        entity, "async_update", AsyncMock()
+    ):
+        await entity.async_added_to_hass()
+
+    assert entity._attr_room_names is not None
+    assert entity._attr_room_names["7"]["label"] == "Restored Kitchen"
+
+    extra = entity.extra_state_attributes
+    assert extra["room_names"]["7"]["label"] == "Restored Kitchen"
+
+    capability_rooms = entity.capability_attributes["robot_vacuum"]["rooms"]
+    assert capability_rooms
+    assert capability_rooms[0]["label"] == "Restored Kitchen"
