@@ -84,6 +84,17 @@ SCAN_INTERVAL = timedelta(seconds=REFRESH_RATE)
 UPDATE_RETRIES = 3
 
 
+# Known room clean payloads that map to human-friendly room labels.
+# These values are captured from real devices that emit non-JSON payloads
+# for DP 168 updates. The mapping helps surface friendly labels when the
+# payload format cannot be decoded dynamically.
+KNOWN_ROOM_PAYLOAD_LABELS: dict[str, dict[str, str | None]] = {
+    "KAomCgIIZBIDCI4CGgMIjgIiAghkKgIIZDIDCJ4BoAG4x7Lu/9HAuhg=": {
+        "100": "Living Room",
+    }
+}
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
