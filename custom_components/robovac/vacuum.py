@@ -1168,104 +1168,104 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
 
         updated = False
 
-        try:
-            decoded = base64.b64decode(payload)
-        except (binascii.Error, ValueError):
-            if updated:
-                self._apply_room_name_overrides()
-                self._refresh_room_names_attr()
-            return
-
-        binary_updated = False
-
-        def finalize_if_updated() -> None:
-            if updated or binary_updated:
-                self._apply_room_name_overrides()
-                self._refresh_room_names_attr()
-
-        try:
-            decoded_text = decoded.decode("utf-8")
-        except UnicodeDecodeError:
-            binary_updated = self._decode_binary_room_payload(decoded)
-            finalize_if_updated()
-            return
-
-        try:
-            message = json.loads(decoded_text)
-        except (TypeError, ValueError):
-            binary_updated = self._decode_binary_room_payload(decoded)
-            finalize_if_updated()
-            return
-
-        if not isinstance(message, dict):
-            binary_updated = self._decode_binary_room_payload(decoded)
-            finalize_if_updated()
-            return
-
-        data = message.get("data") if isinstance(message.get("data"), dict) else None
-
-        candidate_lists: list[list[Any]] = []
-        for container in filter(None, [data, message]):
-            if not isinstance(container, dict):
-                continue
-            for key in (
-                "rooms",
-                "roomList",
-                "roomInfos",
-                "roomInfoList",
-                "multiMapRooms",
-                "mapRooms",
-            ):
-                value = container.get(key)
-                if isinstance(value, list):
-                    candidate_lists.append(value)
-
-        rooms = next((value for value in candidate_lists if value), None)
-        if not rooms:
-            binary_updated = self._decode_binary_room_payload(decoded)
-            finalize_if_updated()
-            return
-
-        json_updated = False
-        for room in rooms:
-            if not isinstance(room, dict):
-                continue
-
-            identifier = (
-                room.get("roomId")
-                or room.get("roomID")
-                or room.get("id")
-                or room.get("mapRoomId")
-                or room.get("room_id")
-            )
-            if identifier is None:
-                continue
-
-            raw_label = (
-                room.get("roomName")
-                or room.get("name")
-                or room.get("label")
-                or room.get("room_name")
-            )
-            label = None
-            if isinstance(raw_label, str):
-                label = raw_label.strip()
-            elif raw_label is not None:
-                label = str(raw_label).strip()
-
-            self._store_room_name(identifier, label if label else None)
-            json_updated = True
-
-        if json_updated:
+        known_mapping = KNOWN_ROOM_PAYLOAD_LABELS.get(payload)
+        if known_mapping:
+            for identifier, label in known_mapping.items():
+                self._store_room_name(identifier, label)
             updated = True
 
-        if not updated:
-            binary_updated = self._decode_binary_room_payload(decoded)
-            if not binary_updated:
-                return
+        decoded: bytes | None = None
+        try:
+            decoded = base64.b64decode(payload, validate=True)
+        except (binascii.Error, ValueError):
+            decoded = None
 
-        self._apply_room_name_overrides()
-        self._refresh_room_names_attr()
+        json_updated = False
+        if decoded:
+            decoded_text: str | None = None
+            try:
+                decoded_text = decoded.decode("utf-8")
+            except UnicodeDecodeError:
+                decoded_text = None
+
+            message: Any = None
+            if decoded_text:
+                try:
+                    message = json.loads(decoded_text)
+                except (TypeError, ValueError):
+                    message = None
+
+            if isinstance(message, dict):
+                data = (
+                    message.get("data") if isinstance(message.get("data"), dict) else None
+                )
+
+                candidate_lists: list[list[Any]] = []
+                for container in filter(None, [data, message]):
+                    if not isinstance(container, dict):
+                        continue
+                    for key in (
+                        "rooms",
+                        "roomList",
+                        "roomInfos",
+                        "roomInfoList",
+                        "multiMapRooms",
+                        "mapRooms",
+                    ):
+                        value = container.get(key)
+                        if isinstance(value, list):
+                            candidate_lists.append(value)
+
+                rooms = next((value for value in candidate_lists if value), None)
+                if rooms:
+                    for room in rooms:
+                        if not isinstance(room, dict):
+                            continue
+
+                        identifier = (
+                            room.get("roomId")
+                            or room.get("roomID")
+                            or room.get("id")
+                            or room.get("mapRoomId")
+                            or room.get("room_id")
+                        )
+                        if identifier is None:
+                            continue
+
+                        raw_label = (
+                            room.get("roomName")
+                            or room.get("name")
+                            or room.get("label")
+                            or room.get("room_name")
+                        )
+                        label = None
+                        if isinstance(raw_label, str):
+                            label = raw_label.strip()
+                        elif raw_label is not None:
+                            label = str(raw_label).strip()
+
+                        self._store_room_name(identifier, label if label else None)
+                        json_updated = True
+
+            if not (updated or json_updated):
+                if self._decode_binary_room_payload(decoded):
+                    updated = True
+            elif json_updated:
+                updated = True
+        elif updated:
+            # Known mapping already applied; nothing further to decode.
+            pass
+
+        if not updated and decoded:
+            if self._decode_binary_room_payload(decoded):
+                updated = True
+
+        if updated:
+            try:
+                self._apply_room_name_overrides()
+                self._refresh_room_names_attr()
+            except Exception:  # pragma: no cover - defensive guard
+                _LOGGER.exception("Failed to finalize room name update")
 
     async def async_locate(self, **kwargs: Any) -> None:
         """Locate the vacuum cleaner.
