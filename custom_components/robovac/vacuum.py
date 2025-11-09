@@ -26,7 +26,7 @@ from enum import StrEnum
 import json
 import logging
 import time
-from typing import Any, Callable
+from typing import Any, Callable, List, Tuple
 
 from homeassistant.components.vacuum import (
     StateVacuumEntity,
@@ -60,6 +60,17 @@ from .vacuums.base import (
 from .robovac import ModelNotSupportedException, RoboVac
 from .tuyalocalapi import TuyaException
 from .room_payload import decode_binary_room_list
+
+
+# Base64 encoded ROOM_CLEAN payloads observed to map to specific rooms.
+# The values are tuples of ``(identifier, label)`` entries.
+KNOWN_ROOM_CLEAN_PAYLOADS: dict[str, list[tuple[int | str, str]]] = {
+    # Payload observed to contain a single room with identifier 100 but without
+    # an embedded friendly name. The device reports the room as the living room.
+    "KAomCgIIZBIDCI4CGgMIjgIiAghkKgIIZDIDCJ4BoAG4x7Lu/9HAuhg=": [
+        (100, "Living Room")
+    ],
+}
 
 ATTR_BATTERY_ICON = "battery_icon"
 ATTR_ERROR = "error"
@@ -980,6 +991,9 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             text = payload.strip()
             if not text:
                 return {}
+            known = self._match_known_room_payload(text, None)
+            if known:
+                return known
             try:
                 payload_dict = json.loads(text)
             except ValueError:
@@ -994,6 +1008,9 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             return {}
 
         if payload_dict is None and payload_bytes is not None:
+            known = self._match_known_room_payload(None, payload_bytes)
+            if known:
+                return known
             try:
                 decoded_text = payload_bytes.decode("utf-8")
             except UnicodeDecodeError:
@@ -1012,7 +1029,42 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
         if payload_bytes is None:
             return {}
 
+        known = self._match_known_room_payload(None, payload_bytes)
+        if known:
+            return known
+
         return self._extract_rooms_from_binary(payload_bytes)
+
+    def _match_known_room_payload(
+        self, payload_str: str | None, payload_bytes: bytes | None
+    ) -> dict[str, dict[str, Any]]:
+        """Return known room metadata for recognized ROOM_CLEAN payloads."""
+
+        candidates: list[str] = []
+        if payload_str:
+            candidates.append(payload_str.strip())
+        if payload_bytes is not None:
+            candidates.append(base64.b64encode(payload_bytes).decode("ascii"))
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            entries = KNOWN_ROOM_CLEAN_PAYLOADS.get(candidate)
+            if not entries:
+                continue
+
+            result: dict[str, dict[str, Any]] = {}
+            for identifier, label in entries:
+                key = str(identifier)
+                result[key] = {
+                    "id": identifier,
+                    "device_label": label,
+                    "label": label,
+                    "source": "device",
+                }
+            return result
+
+        return {}
 
     def _extract_rooms_from_json(self, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         """Extract room entries from a JSON payload."""
