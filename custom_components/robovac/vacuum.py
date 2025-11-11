@@ -1086,7 +1086,7 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
         if not isinstance(rooms, list):
             return {}
 
-        entries: list[tuple[int | str, str | None]] = []
+        result: dict[str, dict[str, Any]] = {}
         for room in rooms:
             if not isinstance(room, dict):
                 continue
@@ -1110,15 +1110,35 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             if isinstance(label, str):
                 label = label.strip() or None
 
-            entries.append((identifier, label))
+            key = str(identifier)
+            result[key] = {
+                "id": identifier,
+                "device_label": label,
+                "label": label,
+                "source": "device",
+            }
 
-        return self._entries_to_room_registry(entries)
+        return result
 
     def _extract_rooms_from_binary(self, payload: bytes) -> dict[str, dict[str, Any]]:
         """Decode a binary payload emitted by some RoboVac models."""
 
         entries = decode_binary_room_list(payload)
-        return self._entries_to_room_registry(entries)
+        result: dict[str, dict[str, Any]] = {}
+
+        for identifier, label in entries:
+            if isinstance(label, str):
+                label = label.strip() or None
+
+            key = str(identifier)
+            result[key] = {
+                "id": identifier,
+                "device_label": label,
+                "label": label,
+                "source": "device",
+            }
+
+        return result
 
     def _entries_to_room_registry(
         self, entries: Iterable[tuple[int | str, str | None]]
