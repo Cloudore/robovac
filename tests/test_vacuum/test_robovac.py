@@ -68,6 +68,35 @@ def test_get_home_assistant_features():
         assert robovac_l70.getHomeAssistantFeatures() == expected_features_with_map
 
 
+def test_t2320_home_assistant_features_cover_card_controls():
+    """Ensure the X9 Pro advertises all of the card control features."""
+
+    with patch(
+        "custom_components.robovac.robovac.TuyaDevice.__init__", return_value=None
+    ):
+        robovac = RoboVac(
+            model_code="T2320",
+            device_id="test_id",
+            host="192.168.1.100",
+            local_key="test_key",
+        )
+
+    expected_features = (
+        VacuumEntityFeature.BATTERY
+        | VacuumEntityFeature.CLEAN_SPOT
+        | VacuumEntityFeature.FAN_SPEED
+        | VacuumEntityFeature.LOCATE
+        | VacuumEntityFeature.PAUSE
+        | VacuumEntityFeature.RETURN_HOME
+        | VacuumEntityFeature.SEND_COMMAND
+        | VacuumEntityFeature.START
+        | VacuumEntityFeature.STATE
+        | VacuumEntityFeature.STOP
+    )
+
+    assert robovac.getHomeAssistantFeatures() == expected_features
+
+
 def test_get_robovac_features():
     """Test getRoboVacFeatures returns correct features for different models."""
     with patch(
