@@ -26,7 +26,7 @@ from enum import StrEnum
 import json
 import logging
 import time
-from typing import Any, Callable, List, Tuple
+from typing import Any, Callable, Iterable, List, Tuple
 
 from homeassistant.components.vacuum import (
     StateVacuumEntity,
@@ -1119,6 +1119,30 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
 
         entries = decode_binary_room_list(payload)
         return self._entries_to_room_registry(entries)
+
+    def _entries_to_room_registry(
+        self, entries: Iterable[tuple[int | str, str | None]]
+    ) -> dict[str, dict[str, Any]]:
+        """Normalize raw room entries into registry format."""
+
+        result: dict[str, dict[str, Any]] = {}
+
+        for identifier, label in entries:
+            if identifier is None:
+                continue
+
+            if isinstance(label, str):
+                label = label.strip() or None
+
+            key = str(identifier)
+            result[key] = {
+                "id": identifier,
+                "device_label": label,
+                "label": label,
+                "source": "device",
+            }
+
+        return result
 
     def _replace_room_registry_entry(
         self, key: str, entry: dict[str, Any]
