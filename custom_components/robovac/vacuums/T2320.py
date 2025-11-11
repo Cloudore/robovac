@@ -6,7 +6,6 @@ from .base import RoboVacEntityFeature, RobovacCommand, RobovacModelDetails
 class T2320(RobovacModelDetails):
     homeassistant_features = (
         VacuumEntityFeature.BATTERY
-        | VacuumEntityFeature.CLEAN_SPOT
         | VacuumEntityFeature.FAN_SPEED
         | VacuumEntityFeature.LOCATE
         | VacuumEntityFeature.PAUSE
