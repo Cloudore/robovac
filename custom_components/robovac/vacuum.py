@@ -141,6 +141,23 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
         return self._attr_activity_mapping
 
     @property
+    def supported_features(self) -> int:  # type: ignore[override]
+        """Expose supported features as an ``int`` for Home Assistant UI checks.
+
+        Home Assistant's Lovelace vacuum card still performs integer bitmask
+        operations when deciding which control buttons to render.  Internally we
+        keep the richer ``VacuumEntityFeature`` ``IntFlag`` instance so the
+        integration can take advantage of flag helpers, but the property needs
+        to coerce the value to ``int`` to ensure the frontend receives the
+        expected numeric mask.
+        """
+
+        value = getattr(self, "_attr_supported_features", VacuumEntityFeature(0))
+        if isinstance(value, VacuumEntityFeature):
+            return int(value)
+        return int(value or 0)
+
+    @property
     def mode(self) -> str | None:
         """Return the cleaning mode of the vacuum cleaner."""
         return self._attr_mode
