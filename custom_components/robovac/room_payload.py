@@ -1,8 +1,66 @@
-"""Helpers for decoding Tuya RoboVac binary room payloads."""
+"""Helpers for decoding Tuya RoboVac room payloads."""
 
 from __future__ import annotations
 
+import base64
+import binascii
+
 from typing import List, Sequence, Tuple
+
+# Base64 encoded ROOM_CLEAN payloads observed to map to specific rooms. These
+# payloads lack embedded friendly names so we maintain a catalogue to preserve
+# Home Assistant's room selection UI when they are encountered.
+KNOWN_ROOM_CLEAN_PAYLOADS: dict[str, List[Tuple[int | str, str]]] = {
+    # Payload observed to contain a single room with identifier 100 but without
+    # an embedded friendly name. The device reports the room as the living room.
+    "KAomCgIIZBIDCI4CGgMIjgIiAghkKgIIZDIDCJ4BoAG4x7Lu/9HAuhg=": [
+        (100, "Living Room")
+    ],
+}
+
+
+def lookup_known_room_clean_payload(
+    payload: str | bytes | bytearray | memoryview | None,
+) -> List[Tuple[int | str, str]]:
+    """Return known room metadata for recognized ROOM_CLEAN payloads."""
+
+    if payload is None:
+        return []
+
+    candidates: list[str] = []
+
+    if isinstance(payload, str):
+        trimmed = payload.strip()
+        if not trimmed:
+            return []
+        candidates.append(trimmed)
+        canonical = _canonicalize_base64(trimmed)
+        if canonical and canonical not in candidates:
+            candidates.append(canonical)
+    else:
+        raw = bytes(payload)
+        candidates.append(base64.b64encode(raw).decode("ascii"))
+
+    for candidate in candidates:
+        entries = KNOWN_ROOM_CLEAN_PAYLOADS.get(candidate)
+        if entries:
+            return entries
+
+    return []
+
+
+def _canonicalize_base64(value: str) -> str | None:
+    """Normalize a base64 string to its canonical representation."""
+
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        try:
+            decoded = base64.b64decode(value)
+        except (binascii.Error, ValueError):
+            return None
+
+    return base64.b64encode(decoded).decode("ascii")
 
 
 def decode_binary_room_list(payload: bytes) -> List[Tuple[int | str, str | None]]:

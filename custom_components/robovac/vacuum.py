@@ -26,7 +26,7 @@ from enum import StrEnum
 import json
 import logging
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from homeassistant.components.vacuum import (
     StateVacuumEntity,
@@ -59,7 +59,13 @@ from .vacuums.base import (
 )
 from .robovac import ModelNotSupportedException, RoboVac
 from .tuyalocalapi import TuyaException
-from .room_payload import decode_binary_room_list
+# Known ROOM_CLEAN payload matching is handled in ``room_payload`` so the logic
+# can be reused by other modules without importing the Home Assistant entity.
+from .room_payload import (
+    decode_binary_room_list,
+    lookup_known_room_clean_payload,
+)
+
 
 ATTR_BATTERY_ICON = "battery_icon"
 ATTR_ERROR = "error"
@@ -980,6 +986,9 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             text = payload.strip()
             if not text:
                 return {}
+            known = self._match_known_room_payload(text, None)
+            if known:
+                return known
             try:
                 payload_dict = json.loads(text)
             except ValueError:
@@ -994,6 +1003,9 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             return {}
 
         if payload_dict is None and payload_bytes is not None:
+            known = self._match_known_room_payload(None, payload_bytes)
+            if known:
+                return known
             try:
                 decoded_text = payload_bytes.decode("utf-8")
             except UnicodeDecodeError:
@@ -1012,7 +1024,47 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
         if payload_bytes is None:
             return {}
 
+        known = self._match_known_room_payload(None, payload_bytes)
+        if known:
+            return known
+
         return self._extract_rooms_from_binary(payload_bytes)
+
+    def _match_known_room_payload(
+        self, payload_str: str | None, payload_bytes: bytes | None
+    ) -> dict[str, dict[str, Any]]:
+        """Return known room metadata for recognized ROOM_CLEAN payloads."""
+
+        for candidate in (payload_str, payload_bytes):
+            if candidate is None:
+                continue
+
+            entries = lookup_known_room_clean_payload(candidate)
+            if not entries:
+                continue
+
+            return self._entries_to_room_registry(entries)
+
+        return {}
+
+    def _entries_to_room_registry(
+        self, entries: Iterable[tuple[int | str, str | None]]
+    ) -> dict[str, dict[str, Any]]:
+        """Convert a list of known room entries into registry payloads."""
+
+        result: dict[str, dict[str, Any]] = {}
+        for identifier, label in entries:
+            key = str(identifier)
+            if isinstance(label, str):
+                label = label.strip() or None
+            result[key] = {
+                "id": identifier,
+                "device_label": label,
+                "label": label,
+                "source": "device",
+            }
+
+        return result
 
     def _extract_rooms_from_json(self, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         """Extract room entries from a JSON payload."""
@@ -1028,7 +1080,7 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
         if not isinstance(rooms, list):
             return {}
 
-        result: dict[str, dict[str, Any]] = {}
+        entries: list[tuple[int | str, str | None]] = []
         for room in rooms:
             if not isinstance(room, dict):
                 continue
@@ -1052,35 +1104,15 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             if isinstance(label, str):
                 label = label.strip() or None
 
-            key = str(identifier)
-            result[key] = {
-                "id": identifier,
-                "device_label": label,
-                "label": label,
-                "source": "device",
-            }
+            entries.append((identifier, label))
 
-        return result
+        return self._entries_to_room_registry(entries)
 
     def _extract_rooms_from_binary(self, payload: bytes) -> dict[str, dict[str, Any]]:
         """Decode a binary payload emitted by some RoboVac models."""
 
         entries = decode_binary_room_list(payload)
-        result: dict[str, dict[str, Any]] = {}
-
-        for identifier, label in entries:
-            if isinstance(label, str):
-                label = label.strip() or None
-
-            key = str(identifier)
-            result[key] = {
-                "id": identifier,
-                "device_label": label,
-                "label": label,
-                "source": "device",
-            }
-
-        return result
+        return self._entries_to_room_registry(entries)
 
     def _replace_room_registry_entry(
         self, key: str, entry: dict[str, Any]
