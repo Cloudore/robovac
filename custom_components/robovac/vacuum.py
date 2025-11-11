@@ -59,7 +59,13 @@ from .vacuums.base import (
 )
 from .robovac import ModelNotSupportedException, RoboVac
 from .tuyalocalapi import TuyaException
-from .room_payload import decode_binary_room_list
+# Known ROOM_CLEAN payload matching is handled in ``room_payload`` so the logic
+# can be reused by other modules without importing the Home Assistant entity.
+from .room_payload import (
+    decode_binary_room_list,
+    lookup_known_room_clean_payload,
+)
+
 
 
 # Base64 encoded ROOM_CLEAN payloads observed to map to specific rooms.
@@ -1080,7 +1086,7 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
         if not isinstance(rooms, list):
             return {}
 
-        result: dict[str, dict[str, Any]] = {}
+        entries: list[tuple[int | str, str | None]] = []
         for room in rooms:
             if not isinstance(room, dict):
                 continue
@@ -1104,35 +1110,15 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             if isinstance(label, str):
                 label = label.strip() or None
 
-            key = str(identifier)
-            result[key] = {
-                "id": identifier,
-                "device_label": label,
-                "label": label,
-                "source": "device",
-            }
+            entries.append((identifier, label))
 
-        return result
+        return self._entries_to_room_registry(entries)
 
     def _extract_rooms_from_binary(self, payload: bytes) -> dict[str, dict[str, Any]]:
         """Decode a binary payload emitted by some RoboVac models."""
 
         entries = decode_binary_room_list(payload)
-        result: dict[str, dict[str, Any]] = {}
-
-        for identifier, label in entries:
-            if isinstance(label, str):
-                label = label.strip() or None
-
-            key = str(identifier)
-            result[key] = {
-                "id": identifier,
-                "device_label": label,
-                "label": label,
-                "source": "device",
-            }
-
-        return result
+        return self._entries_to_room_registry(entries)
 
     def _replace_room_registry_entry(
         self, key: str, entry: dict[str, Any]
