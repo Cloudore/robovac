@@ -539,7 +539,12 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
                 self.vacuum.model_details, "commands", {}
             ):
                 features |= int(VacuumEntityFeature.LOCATE)
-            self._attr_supported_features = features
+            # ``StateVacuumEntity`` expects the stored value to behave like an
+            # ``VacuumEntityFeature`` ``IntFlag`` for downstream bitmask checks
+            # (e.g. when rendering supported commands on the Lovelace card).
+            # Keeping the IntFlag wrapper avoids regressions where Home Assistant
+            # treats the feature set as ``0`` despite the bitmask being populated.
+            self._attr_supported_features = VacuumEntityFeature(features)
             self._attr_robovac_supported = self.vacuum.getRoboVacFeatures()
             self._attr_activity_mapping = self.vacuum.getRoboVacActivityMapping()
             self._attr_fan_speed_list = self.vacuum.getFanSpeeds()
@@ -547,11 +552,11 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             _LOGGER.debug(
                 "Vacuum %s supports features: %s",
                 self._attr_name,
-                VacuumEntityFeature(self._attr_supported_features),
+                self._attr_supported_features,
             )
         else:
             # Set default values if vacuum initialization failed
-            self._attr_supported_features = 0
+            self._attr_supported_features = VacuumEntityFeature(0)
             self._attr_robovac_supported = 0
             self._attr_fan_speed_list = []
             _LOGGER.warning(
