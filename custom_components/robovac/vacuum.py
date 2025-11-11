@@ -26,7 +26,7 @@ from enum import StrEnum
 import json
 import logging
 import time
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, List, Tuple
 
 from homeassistant.components.vacuum import (
     StateVacuumEntity,
@@ -66,6 +66,17 @@ from .room_payload import (
     lookup_known_room_clean_payload,
 )
 
+
+
+# Base64 encoded ROOM_CLEAN payloads observed to map to specific rooms.
+# The values are tuples of ``(identifier, label)`` entries.
+KNOWN_ROOM_CLEAN_PAYLOADS: dict[str, list[tuple[int | str, str]]] = {
+    # Payload observed to contain a single room with identifier 100 but without
+    # an embedded friendly name. The device reports the room as the living room.
+    "KAomCgIIZBIDCI4CGgMIjgIiAghkKgIIZDIDCJ4BoAG4x7Lu/9HAuhg=": [
+        (100, "Living Room")
+    ],
+}
 
 ATTR_BATTERY_ICON = "battery_icon"
 ATTR_ERROR = "error"
@@ -1035,36 +1046,31 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
     ) -> dict[str, dict[str, Any]]:
         """Return known room metadata for recognized ROOM_CLEAN payloads."""
 
-        for candidate in (payload_str, payload_bytes):
-            if candidate is None:
-                continue
+        candidates: list[str] = []
+        if payload_str:
+            candidates.append(payload_str.strip())
+        if payload_bytes is not None:
+            candidates.append(base64.b64encode(payload_bytes).decode("ascii"))
 
-            entries = lookup_known_room_clean_payload(candidate)
+        for candidate in candidates:
+            if not candidate:
+                continue
+            entries = KNOWN_ROOM_CLEAN_PAYLOADS.get(candidate)
             if not entries:
                 continue
 
-            return self._entries_to_room_registry(entries)
+            result: dict[str, dict[str, Any]] = {}
+            for identifier, label in entries:
+                key = str(identifier)
+                result[key] = {
+                    "id": identifier,
+                    "device_label": label,
+                    "label": label,
+                    "source": "device",
+                }
+            return result
 
         return {}
-
-    def _entries_to_room_registry(
-        self, entries: Iterable[tuple[int | str, str | None]]
-    ) -> dict[str, dict[str, Any]]:
-        """Convert a list of known room entries into registry payloads."""
-
-        result: dict[str, dict[str, Any]] = {}
-        for identifier, label in entries:
-            key = str(identifier)
-            if isinstance(label, str):
-                label = label.strip() or None
-            result[key] = {
-                "id": identifier,
-                "device_label": label,
-                "label": label,
-                "source": "device",
-            }
-
-        return result
 
     def _extract_rooms_from_json(self, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         """Extract room entries from a JSON payload."""
