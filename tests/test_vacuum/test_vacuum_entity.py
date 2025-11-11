@@ -6,7 +6,7 @@ import json
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from homeassistant.components.vacuum import VacuumActivity
+from homeassistant.components.vacuum import VacuumActivity, VacuumEntityFeature
 from homeassistant.core import State
 from custom_components.robovac.const import CONF_ROOM_NAMES
 from custom_components.robovac.vacuum import RoboVacEntity
@@ -228,6 +228,26 @@ async def test_update_entity_values(mock_robovac, mock_vacuum_data):
         assert entity.error_code == 0
         assert entity._attr_mode == "auto"
         assert entity._attr_fan_speed == "Standard"
+
+
+@pytest.mark.asyncio
+async def test_supported_features_exposes_all_card_controls(
+    mock_robovac, mock_vacuum_data
+):
+    """Ensure supported_features advertises all control bits for the HA card."""
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+
+    expected = int(mock_robovac.getHomeAssistantFeatures.return_value)
+    expected |= int(VacuumEntityFeature.LOCATE)
+
+    assert isinstance(entity.supported_features, int)
+    assert entity.supported_features == expected
+    assert entity.supported_features & int(VacuumEntityFeature.START)
+    assert entity.supported_features & int(VacuumEntityFeature.PAUSE)
+    assert entity.supported_features & int(VacuumEntityFeature.RETURN_HOME)
+    assert entity.supported_features & int(VacuumEntityFeature.STOP)
 
 
 @pytest.mark.asyncio
