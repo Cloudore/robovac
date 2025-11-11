@@ -6,7 +6,7 @@ import json
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from homeassistant.components.vacuum import VacuumActivity
+from homeassistant.components.vacuum import VacuumActivity, VacuumEntityFeature
 from homeassistant.core import State
 from custom_components.robovac.const import CONF_ROOM_NAMES
 from custom_components.robovac.vacuum import RoboVacEntity
@@ -231,6 +231,26 @@ async def test_update_entity_values(mock_robovac, mock_vacuum_data):
 
 
 @pytest.mark.asyncio
+async def test_supported_features_exposes_all_card_controls(
+    mock_robovac, mock_vacuum_data
+):
+    """Ensure supported_features advertises all control bits for the HA card."""
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+
+    expected = int(mock_robovac.getHomeAssistantFeatures.return_value)
+    expected |= int(VacuumEntityFeature.LOCATE)
+
+    assert isinstance(entity.supported_features, int)
+    assert entity.supported_features == expected
+    assert entity.supported_features & int(VacuumEntityFeature.START)
+    assert entity.supported_features & int(VacuumEntityFeature.PAUSE)
+    assert entity.supported_features & int(VacuumEntityFeature.RETURN_HOME)
+    assert entity.supported_features & int(VacuumEntityFeature.STOP)
+
+
+@pytest.mark.asyncio
 async def test_fan_speed_formatting(mock_robovac, mock_vacuum_data):
     """Test fan speed formatting in update_entity_values."""
     # Arrange
@@ -357,6 +377,26 @@ async def test_known_binary_payload_mapping(mock_robovac, mock_vacuum_data):
 
 
 @pytest.mark.asyncio
+async def test_known_binary_payload_mapping_bytes(mock_robovac, mock_vacuum_data):
+    """Known payloads sent as bytes are mapped to friendly room labels."""
+
+    mock_robovac.getDpsCodes.return_value = {"ROOM_CLEAN": "168"}
+    mock_robovac._dps = {
+        "168": base64.b64decode("KAomCgIIZBIDCI4CGgMIjgIiAghkKgIIZDIDCJ4BoAG4x7Lu/9HAuhg="),
+    }
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+        entity.update_entity_values()
+
+    assert entity._attr_room_names is not None
+    entry = entity._attr_room_names["100"]
+    assert entry["id"] == 100
+    assert entry["label"] == "Living Room"
+    assert entry["source"] == "device"
+
+
+@pytest.mark.asyncio
 async def test_binary_room_payload_decoding(
     mock_robovac, mock_vacuum_data, binary_room_payload
 ):
@@ -432,3 +472,101 @@ async def test_room_registry_restored_on_startup(
     capability_rooms = entity.capability_attributes["robot_vacuum"]["rooms"]
     assert capability_rooms
     assert capability_rooms[0]["label"] == "Restored Kitchen"
+
+
+@pytest.mark.asyncio
+async def test_async_start_triggers_auto_mode(mock_robovac, mock_vacuum_data) -> None:
+    """Starting from the UI sends the AUTO mode command to the device."""
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+
+    mock_robovac.async_set.reset_mock()
+
+    await entity.async_start()
+
+    mock_robovac.async_set.assert_awaited_once_with({TuyaCodes.MODE.value: "auto"})
+    assert entity.mode == "auto"
+
+
+@pytest.mark.asyncio
+async def test_async_pause_triggers_pause_command(mock_robovac, mock_vacuum_data) -> None:
+    """Pausing from the UI sends the START/PAUSE command to the device."""
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+
+    mock_robovac.async_set.reset_mock()
+
+    await entity.async_pause()
+
+    mock_robovac.async_set.assert_awaited_once_with({TuyaCodes.START_PAUSE.value: "pause"})
+
+
+@pytest.mark.asyncio
+async def test_async_return_to_base_command(mock_robovac, mock_vacuum_data) -> None:
+    """Return-to-base button issues the proper Tuya command."""
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+
+    mock_robovac.async_set.reset_mock()
+
+    await entity.async_return_to_base()
+
+    mock_robovac.async_set.assert_awaited_once_with({TuyaCodes.RETURN_HOME.value: True})
+
+
+@pytest.mark.asyncio
+async def test_async_stop_uses_return_to_base(mock_robovac, mock_vacuum_data) -> None:
+    """Stop action piggy-backs on the return-to-base behavior."""
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+
+    with patch.object(entity, "async_return_to_base", AsyncMock()) as mocked_return:
+        await entity.async_stop()
+
+    mocked_return.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_async_locate_toggles_beeper(mock_robovac, mock_vacuum_data) -> None:
+    """Locate button toggles the underlying Tuya DPS code."""
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+
+    mock_robovac.async_set.reset_mock()
+
+    await entity.async_locate()
+
+    mock_robovac.async_set.assert_awaited_once_with({TuyaCodes.LOCATE.value: True})
+
+
+@pytest.mark.asyncio
+async def test_async_clean_spot_sends_spot_mode(mock_robovac, mock_vacuum_data) -> None:
+    """Spot clean invokes the MODE command with the correct payload."""
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+
+    mock_robovac.async_set.reset_mock()
+
+    await entity.async_clean_spot()
+
+    mock_robovac.async_set.assert_awaited_once_with({TuyaCodes.MODE.value: "Spot"})
+
+
+@pytest.mark.asyncio
+async def test_async_set_fan_speed_normalizes_value(mock_robovac, mock_vacuum_data) -> None:
+    """Fan speed selection normalizes labels before dispatching."""
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(mock_vacuum_data)
+
+    mock_robovac.async_set.reset_mock()
+
+    await entity.async_set_fan_speed("Boost IQ")
+
+    mock_robovac.async_set.assert_awaited_once_with({TuyaCodes.FAN_SPEED.value: "Boost_IQ"})
