@@ -447,6 +447,8 @@ class RoboVacEntity(StateVacuumEntity):
         # Track last-known mode and timing for return-to-dock heuristic
         self._last_mode_value: str | None = None
         self._last_return_ts: float | None = None
+        # Track locate/beeper state for models that expose explicit on/off DPS
+        self._locate_active: bool = False
 
         # Initialize the RoboVac connection
         try:
@@ -676,6 +678,7 @@ class RoboVacEntity(StateVacuumEntity):
         self._update_battery_level()
         self._update_state_and_error()
         self._update_mode_and_fan_speed()
+        self._update_locate_state()
 
         # Update model-specific attributes
         self._update_cleaning_stats()
@@ -829,6 +832,19 @@ class RoboVacEntity(StateVacuumEntity):
             elif self.fan_speed == "Quiet":
                 self._attr_fan_speed = "Pure"
 
+    def _update_locate_state(self) -> None:
+        """Track locate state for models with explicit on/off DPS codes."""
+        if (
+            self.tuyastatus is None
+            or self.model_code is None
+            or not self.model_code.startswith("T2320")
+        ):
+            return
+
+        locate_code = self._get_dps_code("LOCATE")
+        if locate_code and locate_code in self.tuyastatus:
+            self._locate_active = bool(self.tuyastatus.get(locate_code))
+
     def _update_cleaning_stats(self) -> None:
         """Update cleaning statistics (area and time)."""
         if self.tuyastatus is None:
@@ -900,6 +916,24 @@ class RoboVacEntity(StateVacuumEntity):
             return
 
         locate_code = self._get_dps_code("LOCATE")
+
+        if self.model_code and self.model_code.startswith("T2320"):
+            # T2320 exposes a binary DPS for locate (160) where True starts
+            # the beeper and False stops it. Track the last commanded state so
+            # the locate button can act as a toggle even if the device resets
+            # the DPS value between updates.
+            if locate_code:
+                # Refresh the cached locate state from the most recent DPS
+                # payload when available to keep the toggle in sync with the
+                # vacuum's last reported status.
+                if self.tuyastatus is not None and locate_code in self.tuyastatus:
+                    self._locate_active = bool(self.tuyastatus.get(locate_code))
+
+                target_state = not self._locate_active
+                await self.vacuum.async_set({locate_code: target_state})
+                self._locate_active = target_state
+            return
+
         if self.tuyastatus is not None and self.tuyastatus.get(locate_code):
             await self.vacuum.async_set({locate_code: False})
         else:

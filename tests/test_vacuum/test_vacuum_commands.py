@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import MagicMock, call, patch
 
 from homeassistant.components.vacuum import VacuumEntityFeature
+from homeassistant.const import CONF_MODEL
 
 from custom_components.robovac.vacuum import RoboVacEntity
 from custom_components.robovac.vacuums.base import RobovacCommand
@@ -38,6 +39,32 @@ async def test_async_locate(mock_robovac, mock_vacuum_data):
 
         # Assert
         mock_robovac.async_set.assert_called_once_with({"103": False})
+
+
+@pytest.mark.asyncio
+async def test_async_locate_t2320_binary_toggle(mock_robovac, mock_vacuum_data):
+    """Ensure T2320 locate toggles the binary DPS 160."""
+
+    t2320_data = dict(mock_vacuum_data)
+    t2320_data[CONF_MODEL] = "T2320"
+    mock_robovac.getDpsCodes.return_value = {"LOCATE": "160"}
+    mock_robovac.model_details = MagicMock()
+    mock_robovac.model_details.commands = {RobovacCommand.LOCATE: {"code": 160}}
+
+    with patch("custom_components.robovac.vacuum.RoboVac", return_value=mock_robovac):
+        entity = RoboVacEntity(t2320_data)
+
+    # Locate should start the beeper (True)
+    entity.tuyastatus = {"160": False}
+    mock_robovac.async_set.reset_mock()
+    await entity.async_locate()
+    mock_robovac.async_set.assert_awaited_once_with({"160": True})
+
+    # Calling again should send False to stop locating
+    entity.tuyastatus = {"160": True}
+    mock_robovac.async_set.reset_mock()
+    await entity.async_locate()
+    mock_robovac.async_set.assert_awaited_once_with({"160": False})
 
 
 @pytest.mark.asyncio
