@@ -752,7 +752,7 @@ class TuyaDevice:
         self._queue_interval = INITIAL_QUEUE_TIME
         self._failures = 0
 
-        asyncio.create_task(self.process_queue())
+        self._create_monitored_task(self.process_queue(), "robovac-process-queue")
 
     def __repr__(self) -> str:
         """Return a string representation of the device.
@@ -775,6 +775,41 @@ class TuyaDevice:
             A string representation of the device.
         """
         return "{} ({}:{})".format(self.device_id, self.host, self.port)
+
+    def _log_task_exception(self, task: asyncio.Task[Any]) -> None:
+        """Log any exception raised by an asynchronous task.
+
+        This prevents background tasks from failing silently and mirrors how
+        unhandled promise rejections crash Node.js processes. Any exception is
+        logged with its stack trace for easier troubleshooting while allowing
+        the integration to continue running.
+        """
+
+        if task.cancelled():
+            return
+
+        exception = task.exception()
+        if exception:
+            self._LOGGER.error(
+                "Unhandled exception in task %s: %s",
+                task.get_name(),
+                exception,
+                exc_info=exception,
+            )
+
+    def _create_monitored_task(
+        self, coro: Coroutine[Any, Any, Any], name: str
+    ) -> asyncio.Task[Any]:
+        """Create a task that logs unexpected exceptions.
+
+        Args:
+            coro: Coroutine to schedule.
+            name: A friendly name to identify the task in logs.
+        """
+
+        task = asyncio.create_task(coro, name=name)
+        task.add_done_callback(self._log_task_exception)
+        return task
 
     async def process_queue(self) -> None:
         """Process the queue of messages.
@@ -814,7 +849,9 @@ class TuyaDevice:
                     )
 
         await asyncio.sleep(self._queue_interval)
-        asyncio.create_task(self.process_queue())
+        self._create_monitored_task(
+            self.process_queue(), "robovac-process-queue"
+        )
 
     def clean_queue(self) -> None:
         """Clean the queue of messages.
@@ -850,9 +887,13 @@ class TuyaDevice:
         self._connected = True
 
         if self._ping_task is None:
-            self._ping_task = asyncio.create_task(self.async_ping(self.ping_interval))
+            self._ping_task = self._create_monitored_task(
+                self.async_ping(self.ping_interval), "robovac-ping"
+            )
 
-        asyncio.create_task(self._async_handle_message())
+        self._create_monitored_task(
+            self._async_handle_message(), "robovac-handle-message"
+        )
 
     async def async_disable(self) -> None:
         """Disable the device.
@@ -937,7 +978,9 @@ class TuyaDevice:
             self._queue.append(message)
 
         await asyncio.sleep(ping_interval)
-        self._ping_task = asyncio.create_task(self.async_ping(self.ping_interval))
+        self._ping_task = self._create_monitored_task(
+            self.async_ping(self.ping_interval), "robovac-ping"
+        )
         if self.last_pong < self.last_ping:
             await self.async_disconnect()
 
@@ -988,7 +1031,9 @@ class TuyaDevice:
         Args:
             new_values: A dictionary containing the new state values.
         """
-        asyncio.create_task(self.async_set(new_values))
+        self._create_monitored_task(
+            self.async_set(new_values), "robovac-async-set"
+        )
 
     async def _async_handle_message(self) -> None:
         """Handle incoming messages.
@@ -999,8 +1044,8 @@ class TuyaDevice:
             return
 
         try:
-            self._response_task = asyncio.create_task(
-                self.reader.readuntil(MAGIC_SUFFIX_BYTES)
+            self._response_task = self._create_monitored_task(
+                self.reader.readuntil(MAGIC_SUFFIX_BYTES), "robovac-read-response"
             )
             await self._response_task
             response_data = self._response_task.result()
@@ -1029,10 +1074,14 @@ class TuyaDevice:
             else:
                 handler = self._handlers.get(message.command, None)
                 if handler is not None:
-                    asyncio.create_task(handler(message))
+                    self._create_monitored_task(
+                        handler(message), f"robovac-handler-{message.command}"
+                    )
 
         self._response_task = None
-        asyncio.create_task(self._async_handle_message())
+        self._create_monitored_task(
+            self._async_handle_message(), "robovac-handle-message"
+        )
 
     async def _async_send(self, message: Message, retries: int = 2) -> None:
         """Send a message to the device.
