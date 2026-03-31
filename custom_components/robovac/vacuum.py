@@ -64,6 +64,7 @@ from .vacuums.base import (
 )
 from .robovac import ModelNotSupportedException, RoboVac
 from .tuyalocalapi import TuyaException
+from .tuyawebapi import TuyaAPISession
 
 try:
     from homeassistant.components.vacuum import Segment
@@ -704,6 +705,15 @@ class RoboVacEntity(StateVacuumEntity):
                 "Skipping update for unsupported model: %s", self._attr_model_code
             )
             return
+
+        # For T2320, attempt one cloud room sync even when local updates fail
+        # (for example before autodiscovery resolves the local IP).
+        if (
+            self.model_code is not None
+            and self.model_code.startswith("T2320")
+            and not self._attr_room_names
+        ):
+            await self._async_fetch_room_names_from_oauth_once()
 
         # Skip update if the IP address is not set
         if not self.ip_address:
@@ -1357,6 +1367,78 @@ class RoboVacEntity(StateVacuumEntity):
             for identifier, label in extracted
         }
 
+    def _fetch_room_names_from_tuya_cloud(self) -> dict[str, dict[str, Any]]:
+        """Fetch room names for T2320 from Tuya cloud DPS payloads."""
+        username = self._eufy_username
+        password = self._eufy_password
+        if not username or not password:
+            return {}
+
+        eufy_session = EufyLogon(username, password)
+        response = eufy_session.get_user_info()
+        if response is None or response.status_code != 200:
+            return {}
+
+        user_response = response.json()
+        if user_response.get("res_code") != 1:
+            return {}
+
+        user_info = user_response.get("user_info", {})
+        request_host = user_info.get("request_host")
+        user_id = user_info.get("id")
+        access_token = user_response.get("access_token")
+        if not request_host or not user_id or not access_token:
+            return {}
+
+        settings_response = eufy_session.get_user_settings(
+            request_host,
+            user_id,
+            access_token,
+        )
+        region = "EU"
+        if settings_response is not None and settings_response.status_code == 200:
+            settings = settings_response.json()
+            region = (
+                settings.get("setting", {})
+                .get("home_setting", {})
+                .get("tuya_home", {})
+                .get("tuya_region_code", region)
+            )
+
+        phone_code = user_info.get("phone_code") or "44"
+        timezone = user_info.get("timezone") or "Europe/London"
+
+        tuya_session = TuyaAPISession(
+            username=f"eh-{user_id}",
+            region=region,
+            timezone=timezone,
+            phone_code=phone_code,
+        )
+
+        try:
+            dps = tuya_session._request(
+                action="tuya.m.device.dp.get",
+                version="1.0",
+                data={"devId": str(self.unique_id)},
+            )
+        except Exception:
+            return {}
+
+        room_meta_code = self._get_dps_code("ROOM_META") or "165"
+        room_payload = dps.get(str(room_meta_code))
+        parsed = self._decode_t2320_room_meta_payload(room_payload)
+        if parsed:
+            for entry in parsed.values():
+                entry["source"] = "cloud"
+            return parsed
+
+        room_clean_code = self._get_dps_code("ROOM_CLEAN") or TuyaCodes.ROOM_CLEAN
+        clean_payload = dps.get(str(room_clean_code))
+        parsed_fallback = self._decode_room_payload(clean_payload)
+        for entry in parsed_fallback.values():
+            entry["source"] = "cloud"
+        return parsed_fallback
+
     def _search_nested_room_lists(self, value: Any) -> list[tuple[Any, str]]:
         """Find likely room lists in nested JSON payloads."""
         found: list[tuple[Any, str]] = []
@@ -1438,8 +1520,12 @@ class RoboVacEntity(StateVacuumEntity):
         self._cloud_room_lookup_attempted = True
         try:
             cloud_rooms = await self.hass.async_add_executor_job(
-                self._fetch_room_names_from_eufy_oauth
+                self._fetch_room_names_from_tuya_cloud
             )
+            if not cloud_rooms:
+                cloud_rooms = await self.hass.async_add_executor_job(
+                    self._fetch_room_names_from_eufy_oauth
+                )
         except Exception as err:
             _LOGGER.debug("Failed cloud room lookup for %s: %s", self._attr_name, err)
             return

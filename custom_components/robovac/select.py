@@ -56,7 +56,7 @@ class RobovacRoomSelect(SelectEntity):
         self._vacuum = vacuum
         self._attr_unique_id = f"{vacuum.unique_id}_room_select"
         self._attr_name = "Cleaning Target"
-        self._current_option: str | None = None
+        self._current_option: str | None = CLEAN_WHOLE_HOUSE_OPTION
         self._attr_device_info = vacuum.device_info
         self._remove_room_listener: Callable[[], None] | None = None
 
@@ -111,9 +111,7 @@ class RobovacRoomSelect(SelectEntity):
             if isinstance(value, dict):
                 identifier = value.get("id", identifier)
                 label = (
-                    value.get("label")
-                    or value.get("name")
-                    or value.get("room_name")
+                    value.get("label") or value.get("name") or value.get("room_name")
                 )
             elif isinstance(value, str):
                 label = value
@@ -128,9 +126,7 @@ class RobovacRoomSelect(SelectEntity):
                 continue
             seen_identifiers.add(identifier_str)
             display_label = label if label else identifier_str
-            options.append(
-                _RoomOption(display_label, identifier_str)
-            )
+            options.append(_RoomOption(display_label, identifier_str))
 
         options.sort(key=lambda option: option.label.casefold())
         return options
@@ -144,7 +140,10 @@ class RobovacRoomSelect(SelectEntity):
             self.async_write_ha_state()
             return
 
-        lookup = {room_option.label: room_option.identifier for room_option in self._iter_room_options()}
+        lookup = {
+            room_option.label: room_option.identifier
+            for room_option in self._iter_room_options()
+        }
         if option not in lookup:
             raise ValueError(f"Invalid option: {option}")
 
