@@ -14,6 +14,7 @@
 
 
 """The Eufy Robovac integration."""
+
 from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
@@ -25,7 +26,7 @@ from .const import CONF_VACS, DOMAIN
 
 from .tuyalocaldiscovery import TuyaLocalDiscovery
 
-PLATFORMS = [Platform.VACUUM, Platform.SENSOR]
+PLATFORMS = [Platform.VACUUM, Platform.SENSOR, Platform.SELECT]
 _LOGGER = logging.getLogger(__name__)
 
 

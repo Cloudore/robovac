@@ -16,11 +16,13 @@
 
 This module provides the vacuum entity integration for Eufy Robovac devices.
 """
+
 from __future__ import annotations
 import ast
 import asyncio
 import base64
 import binascii
+from collections.abc import Callable
 from datetime import timedelta
 from enum import StrEnum
 import json
@@ -42,6 +44,8 @@ from homeassistant.const import (
     CONF_MAC,
     CONF_MODEL,
     CONF_NAME,
+    CONF_PASSWORD,
+    CONF_USERNAME,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
@@ -49,7 +53,9 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_VACS, DOMAIN, PING_RATE, REFRESH_RATE, TIMEOUT
+from .eufywebapi import EufyLogon
 from .errors import getErrorMessage
+from .room_payload import decode_binary_room_list, lookup_known_room_clean_payload
 from .vacuums.base import (
     RobovacCommand,
     RoboVacEntityFeature,
@@ -58,6 +64,11 @@ from .vacuums.base import (
 )
 from .robovac import ModelNotSupportedException, RoboVac
 from .tuyalocalapi import TuyaException
+
+try:
+    from homeassistant.components.vacuum import Segment
+except ImportError:
+    Segment = None
 
 ATTR_BATTERY_ICON = "battery_icon"
 ATTR_ERROR = "error"
@@ -77,6 +88,7 @@ ATTR_MODE = "mode"
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=REFRESH_RATE)
 UPDATE_RETRIES = 3
+_FEATURE_CLEAN_AREA = getattr(VacuumEntityFeature, "CLEAN_AREA", 0)
 
 
 async def async_setup_entry(
@@ -86,8 +98,14 @@ async def async_setup_entry(
 ) -> None:
     """Initialize my test integration 2 config entry."""
     vacuums = config_entry.data[CONF_VACS]
-    for item in vacuums:
-        item = vacuums[item]
+    username = config_entry.data.get(CONF_USERNAME)
+    password = config_entry.data.get(CONF_PASSWORD)
+    for vacuum_id in vacuums:
+        item = dict(vacuums[vacuum_id])
+        if username:
+            item[CONF_USERNAME] = username
+        if password:
+            item[CONF_PASSWORD] = password
         entity = RoboVacEntity(item)
         hass.data[DOMAIN][CONF_VACS][item[CONF_ID]] = entity
         async_add_entities([entity])
@@ -121,6 +139,7 @@ class RoboVacEntity(StateVacuumEntity):
     _attr_activity_mapping: dict[str, VacuumActivity] | None = None
     _attr_error_code: int | str | None = None
     _attr_tuya_state: int | str | None = None
+    _attr_room_names: dict[str, dict[str, Any]] | None = None
 
     @property
     def robovac_supported(self) -> int | None:
@@ -295,9 +314,7 @@ class RoboVacEntity(StateVacuumEntity):
                 )
                 # Fall through to heuristics and mode-based mapping
 
-        if (
-            self._attr_tuya_state == "Charging" or self._attr_tuya_state == "completed"
-        ):
+        if self._attr_tuya_state == "Charging" or self._attr_tuya_state == "completed":
             return VacuumActivity.DOCKED
         elif self._attr_tuya_state == "Recharge":
             return VacuumActivity.RETURNING
@@ -415,7 +432,85 @@ class RoboVacEntity(StateVacuumEntity):
             data[ATTR_CONSUMABLES] = self.consumables
         if self.mode:
             data[ATTR_MODE] = self.mode
+        if self._attr_room_names:
+            data["room_names"] = self._attr_room_names
+            data.setdefault("robot_vacuum", {})["rooms"] = {
+                key: {
+                    "id": value.get("id"),
+                    "label": value.get("label"),
+                }
+                for key, value in self._attr_room_names.items()
+            }
         return data
+
+    @property
+    def capability_attributes(self) -> dict[str, Any] | None:
+        """Return capability metadata, including cleanable room segments."""
+        base = super().capability_attributes
+        data = dict(base) if isinstance(base, dict) else {}
+
+        if self._attr_room_names:
+            data.setdefault("robot_vacuum", {})["rooms"] = [
+                {
+                    "id": entry.get("id"),
+                    "name": entry.get("label"),
+                    "label": entry.get("label"),
+                }
+                for entry in self._attr_room_names.values()
+            ]
+
+        return data or None
+
+    def _iter_room_segments(self) -> list[dict[str, str]]:
+        """Build normalized room segment list from discovered room names."""
+        if not self._attr_room_names:
+            return []
+
+        segments: list[dict[str, str]] = []
+        for key, entry in self._attr_room_names.items():
+            identifier = entry.get("id")
+            if identifier is None:
+                identifier = key
+
+            label = entry.get("label")
+            if not isinstance(label, str) or not label.strip():
+                label = str(identifier)
+
+            segments.append({"id": str(identifier), "name": label.strip()})
+
+        segments.sort(key=lambda segment: segment["name"].lower())
+        return segments
+
+    async def async_get_segments(self) -> list[Any]:
+        """Return cleanable segments for Home Assistant area mapping."""
+        segments = self._iter_room_segments()
+        if Segment is None:
+            return segments
+        return [Segment(id=item["id"], name=item["name"]) for item in segments]
+
+    async def async_clean_segments(self, segment_ids: list[str], **kwargs: Any) -> None:
+        """Clean selected room segments (used by vacuum.clean_area)."""
+        normalized_ids: list[int | str] = []
+        for identifier in segment_ids:
+            value = str(identifier)
+            if value.isdigit():
+                normalized_ids.append(int(value))
+            else:
+                normalized_ids.append(value)
+
+        if not normalized_ids:
+            return
+
+        repeat = kwargs.get("count", kwargs.get("clean_times", 1))
+        try:
+            repeat_count = int(repeat)
+        except (TypeError, ValueError):
+            repeat_count = 1
+
+        await self.async_send_command(
+            "roomClean",
+            params={"roomIds": normalized_ids, "count": max(1, repeat_count)},
+        )
 
     def __init__(self, item: dict[str, Any]) -> None:
         """Initialize the RoboVac vacuum entity.
@@ -449,6 +544,11 @@ class RoboVacEntity(StateVacuumEntity):
         self._last_return_ts: float | None = None
         # Track locate/beeper state for models that expose explicit on/off DPS
         self._locate_active: bool = False
+        self._room_name_registry: dict[str, dict[str, Any]] = {}
+        self._room_name_listeners: set[Callable[[], None]] = set()
+        self._eufy_username: str | None = item.get(CONF_USERNAME)
+        self._eufy_password: str | None = item.get(CONF_PASSWORD)
+        self._cloud_room_lookup_attempted = False
 
         # Initialize the RoboVac connection
         try:
@@ -480,6 +580,8 @@ class RoboVacEntity(StateVacuumEntity):
         if self.vacuum is not None:
             # Get the supported features from the vacuum
             features = int(self.vacuum.getHomeAssistantFeatures())
+            if self.model_code and self.model_code.startswith("T2320"):
+                features |= int(_FEATURE_CLEAN_AREA)
             if hasattr(
                 self.vacuum, "model_details"
             ) and RobovacCommand.LOCATE in getattr(
@@ -542,10 +644,10 @@ class RoboVacEntity(StateVacuumEntity):
                     await asyncio.sleep(0.5)
                     await self.async_update()
 
-        # As a last resort for models that don't answer GET until a SET is sent,
-        # probe fan speed on X-series (T2320) to trigger a state push without
-        # changing the cleaning state. This is limited to T2320 to avoid altering
-        # behavior on other models.
+            # As a last resort for models that don't answer GET until a SET is sent,
+            # probe fan speed on X-series (T2320) to trigger a state push without
+            # changing the cleaning state. This is limited to T2320 to avoid altering
+            # behavior on other models.
             if (
                 (
                     (self._attr_tuya_state is None or self._attr_tuya_state == 0)
@@ -622,6 +724,7 @@ class RoboVacEntity(StateVacuumEntity):
             await self.vacuum.async_get()
             self.update_failures = 0
             self.update_entity_values()
+            await self._async_fetch_room_names_from_oauth_once()
             _LOGGER.debug("Successfully updated vacuum %s", self._attr_name)
         except TuyaException as e:
             self.update_failures += 1
@@ -682,6 +785,7 @@ class RoboVacEntity(StateVacuumEntity):
 
         # Update model-specific attributes
         self._update_cleaning_stats()
+        self._update_room_names_from_device_payload()
 
     def _get_dps_code(self, code_name: str) -> str:
         """Get the DPS code for a specific function.
@@ -904,6 +1008,456 @@ class RoboVacEntity(StateVacuumEntity):
                                 "Failed to decode consumable data: %s", str(e)
                             )
 
+    def _refresh_room_names_attr(self) -> None:
+        """Refresh exported room names and notify listeners."""
+        if self._room_name_registry:
+            self._attr_room_names = {
+                key: {
+                    "id": entry.get("id"),
+                    "key": entry.get("key", key),
+                    "label": entry.get("label"),
+                    "device_label": entry.get("device_label"),
+                    "source": entry.get("source", "device"),
+                }
+                for key, entry in sorted(self._room_name_registry.items())
+            }
+        else:
+            self._attr_room_names = None
+
+        for listener in list(self._room_name_listeners):
+            try:
+                listener()
+            except Exception:
+                _LOGGER.exception("Room name listener raised an exception")
+
+    def _normalize_room_entry(
+        self, identifier: Any, label: Any, source: str
+    ) -> dict[str, Any]:
+        """Build a normalized room entry payload."""
+        key = str(identifier)
+        room_label = label.strip() if isinstance(label, str) else ""
+        if not room_label:
+            room_label = key
+        return {
+            "id": identifier,
+            "key": key,
+            "label": room_label,
+            "device_label": room_label,
+            "source": source,
+        }
+
+    def _merge_room_entries(self, entries: dict[str, dict[str, Any]]) -> bool:
+        """Merge room entries into the registry."""
+        changed = False
+        for key, entry in entries.items():
+            if self._room_name_registry.get(key) != entry:
+                self._room_name_registry[key] = entry
+                changed = True
+        if changed:
+            self._refresh_room_names_attr()
+        return changed
+
+    def _extract_rooms_from_json(
+        self, payload: dict[str, Any]
+    ) -> dict[str, dict[str, Any]]:
+        """Extract room names from JSON payload shapes."""
+        candidates: list[Any] = []
+
+        if isinstance(payload.get("data"), dict):
+            data = payload["data"]
+            if isinstance(data.get("rooms"), list):
+                candidates.append(data.get("rooms"))
+        if isinstance(payload.get("rooms"), list):
+            candidates.append(payload.get("rooms"))
+
+        for room_list in candidates:
+            parsed: dict[str, dict[str, Any]] = {}
+            for room in room_list:
+                if not isinstance(room, dict):
+                    continue
+                identifier = (
+                    room.get("roomId")
+                    or room.get("room_id")
+                    or room.get("roomID")
+                    or room.get("segmentId")
+                    or room.get("segment_id")
+                    or room.get("id")
+                )
+                if identifier is None:
+                    continue
+                label = (
+                    room.get("roomName")
+                    or room.get("room_name")
+                    or room.get("segmentName")
+                    or room.get("segment_name")
+                    or room.get("label")
+                    or room.get("name")
+                )
+                entry = self._normalize_room_entry(identifier, label, "device")
+                parsed[str(identifier)] = entry
+            if parsed:
+                return parsed
+
+        return {}
+
+    def _decode_room_payload(self, payload: Any) -> dict[str, dict[str, Any]]:
+        """Decode ROOM_CLEAN payload into room entries."""
+        if payload is None:
+            return {}
+
+        payload_dict: dict[str, Any] | None = None
+        payload_bytes: bytes | None = None
+
+        if isinstance(payload, dict):
+            payload_dict = payload
+        elif isinstance(payload, (bytes, bytearray, memoryview)):
+            payload_bytes = bytes(payload)
+        elif isinstance(payload, str):
+            text = payload.strip()
+            if not text:
+                return {}
+            try:
+                payload_dict = json.loads(text)
+            except ValueError:
+                try:
+                    payload_bytes = base64.b64decode(text, validate=True)
+                except (binascii.Error, ValueError):
+                    try:
+                        payload_bytes = base64.b64decode(text)
+                    except (binascii.Error, ValueError):
+                        payload_bytes = text.encode("utf-8")
+        else:
+            return {}
+
+        if payload_dict is None and payload_bytes is not None:
+            try:
+                payload_dict = json.loads(payload_bytes.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                payload_dict = None
+
+        if payload_dict is not None:
+            parsed = self._extract_rooms_from_json(payload_dict)
+            if parsed:
+                return parsed
+
+        if payload_bytes is None:
+            return {}
+
+        parsed_binary: dict[str, dict[str, Any]] = {}
+        for identifier, label in decode_binary_room_list(payload_bytes):
+            parsed_binary[str(identifier)] = self._normalize_room_entry(
+                identifier,
+                label,
+                "device",
+            )
+        if parsed_binary:
+            return parsed_binary
+
+        known_entries = []
+        if isinstance(payload, (str, bytes, bytearray, memoryview)):
+            known_entries = lookup_known_room_clean_payload(payload)
+        return {
+            str(identifier): self._normalize_room_entry(identifier, label, "device")
+            for identifier, label in known_entries
+        }
+
+    def _decode_t2320_room_meta_payload(
+        self, payload: Any
+    ) -> dict[str, dict[str, Any]]:
+        """Decode T2320 room metadata payload (DP 165)."""
+        raw: bytes | None = None
+
+        if isinstance(payload, (bytes, bytearray, memoryview)):
+            raw = bytes(payload)
+        elif isinstance(payload, str):
+            text = payload.strip()
+            if not text:
+                return {}
+            try:
+                raw = base64.b64decode(text, validate=True)
+            except (binascii.Error, ValueError):
+                try:
+                    raw = base64.b64decode(text)
+                except (binascii.Error, ValueError):
+                    raw = None
+
+        if not raw:
+            return {}
+
+        try:
+            top = self._parse_protobuf_message(raw)
+        except ValueError:
+            return {}
+
+        parsed: dict[str, dict[str, Any]] = {}
+        for entry_payload in top.get(2, []):
+            if not isinstance(entry_payload, (bytes, bytearray, memoryview)):
+                continue
+            try:
+                room_fields = self._parse_protobuf_message(bytes(entry_payload))
+            except ValueError:
+                continue
+
+            identifier = None
+            for value in room_fields.get(1, []):
+                if isinstance(value, int):
+                    identifier = value
+                    break
+
+            if identifier is None:
+                continue
+
+            label: str | None = None
+            for value in room_fields.get(2, []):
+                if not isinstance(value, (bytes, bytearray, memoryview)):
+                    continue
+                try:
+                    candidate = bytes(value).decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    continue
+                if candidate:
+                    label = candidate
+                    break
+
+            parsed[str(identifier)] = self._normalize_room_entry(
+                identifier,
+                label,
+                "device",
+            )
+
+        return parsed
+
+    def _parse_protobuf_message(self, message: bytes) -> dict[int, list[int | bytes]]:
+        """Parse a minimal protobuf payload into a field mapping."""
+        offset = 0
+        result: dict[int, list[int | bytes]] = {}
+
+        while offset < len(message):
+            tag, offset = self._read_protobuf_varint(message, offset)
+            field_number = tag >> 3
+            wire_type = tag & 0x07
+
+            if wire_type == 0:
+                value, offset = self._read_protobuf_varint(message, offset)
+            elif wire_type == 2:
+                size, offset = self._read_protobuf_varint(message, offset)
+                if offset + size > len(message):
+                    raise ValueError("invalid protobuf payload")
+                value = message[offset : offset + size]
+                offset += size
+            elif wire_type == 1:
+                if offset + 8 > len(message):
+                    raise ValueError("invalid protobuf payload")
+                value = message[offset : offset + 8]
+                offset += 8
+            elif wire_type == 5:
+                if offset + 4 > len(message):
+                    raise ValueError("invalid protobuf payload")
+                value = message[offset : offset + 4]
+                offset += 4
+            else:
+                raise ValueError("unsupported protobuf wire type")
+
+            result.setdefault(field_number, []).append(value)
+
+        return result
+
+    def _read_protobuf_varint(self, buffer: bytes, offset: int) -> tuple[int, int]:
+        """Read a protobuf varint from *buffer*."""
+        result = 0
+        shift = 0
+
+        while offset < len(buffer):
+            byte = buffer[offset]
+            offset += 1
+            result |= (byte & 0x7F) << shift
+            if not (byte & 0x80):
+                return result, offset
+            shift += 7
+            if shift >= 64:
+                break
+
+        raise ValueError("invalid varint")
+
+    def _update_room_names_from_device_payload(self) -> None:
+        """Update room registry from local Tuya payload for T2320."""
+        if (
+            self.model_code is None
+            or not self.model_code.startswith("T2320")
+            or self.tuyastatus is None
+        ):
+            return
+
+        room_meta_code = self._get_dps_code("ROOM_META")
+        if room_meta_code:
+            room_meta_payload = self.tuyastatus.get(room_meta_code)
+            parsed_meta = self._decode_t2320_room_meta_payload(room_meta_payload)
+            if parsed_meta:
+                self._merge_room_entries(parsed_meta)
+                return
+
+        room_clean_code = self._get_dps_code("ROOM_CLEAN")
+        if not room_clean_code:
+            room_clean_code = TuyaCodes.ROOM_CLEAN
+        payload = self.tuyastatus.get(room_clean_code)
+        parsed = self._decode_room_payload(payload)
+        if parsed:
+            self._merge_room_entries(parsed)
+
+    def _fetch_room_names_from_eufy_oauth(self) -> dict[str, dict[str, Any]]:
+        """Fetch room names from Eufy cloud APIs for T2320."""
+        username = self._eufy_username
+        password = self._eufy_password
+        if not username or not password:
+            return {}
+
+        eufy_session = EufyLogon(username, password)
+        response = eufy_session.get_user_info()
+        if response is None or response.status_code != 200:
+            return {}
+
+        user_response = response.json()
+        if user_response.get("res_code") != 1:
+            return {}
+
+        user_info = user_response.get("user_info", {})
+        request_host = user_info.get("request_host")
+        user_id = user_info.get("id")
+        access_token = user_response.get("access_token")
+        if not request_host or not user_id or not access_token:
+            return {}
+
+        response = eufy_session.get_device_info(request_host, user_id, access_token)
+        if response is None or response.status_code != 200:
+            return {}
+
+        payload = response.json()
+        devices = payload.get("devices")
+        if not isinstance(devices, list):
+            items = payload.get("items")
+            if isinstance(items, list):
+                devices = [item.get("device", item) for item in items]
+            else:
+                devices = []
+
+        target_device: dict[str, Any] | None = None
+        for candidate in devices:
+            if not isinstance(candidate, dict):
+                continue
+            if str(candidate.get("id")) == str(self.unique_id):
+                target_device = candidate
+                break
+
+        if target_device is None:
+            return {}
+
+        extracted = self._search_nested_room_lists(target_device)
+        return {
+            str(identifier): self._normalize_room_entry(identifier, label, "cloud")
+            for identifier, label in extracted
+        }
+
+    def _search_nested_room_lists(self, value: Any) -> list[tuple[Any, str]]:
+        """Find likely room lists in nested JSON payloads."""
+        found: list[tuple[Any, str]] = []
+
+        def _visit(node: Any) -> None:
+            nonlocal found
+            if isinstance(node, dict):
+                _parse_candidate_list(node.get("rooms"))
+                for nested in node.values():
+                    _visit(nested)
+                return
+
+            if isinstance(node, list):
+                _parse_candidate_list(node)
+                for nested in node:
+                    _visit(nested)
+                return
+
+            if isinstance(node, str) and node and node[0] in "[{":
+                try:
+                    decoded = json.loads(node)
+                except ValueError:
+                    return
+                _visit(decoded)
+
+        def _parse_candidate_list(candidate: Any) -> None:
+            if not isinstance(candidate, list):
+                return
+            parsed: list[tuple[Any, str]] = []
+            for item in candidate:
+                if not isinstance(item, dict):
+                    return
+                identifier = (
+                    item.get("roomId")
+                    or item.get("room_id")
+                    or item.get("roomID")
+                    or item.get("segmentId")
+                    or item.get("segment_id")
+                    or item.get("id")
+                )
+                label = (
+                    item.get("roomName")
+                    or item.get("room_name")
+                    or item.get("segmentName")
+                    or item.get("segment_name")
+                    or item.get("label")
+                    or item.get("name")
+                )
+                if identifier is None or not isinstance(label, str):
+                    continue
+                trimmed = label.strip()
+                if not trimmed:
+                    continue
+                parsed.append((identifier, trimmed))
+
+            if parsed:
+                found.extend(parsed)
+
+        _visit(value)
+
+        deduped: dict[str, tuple[Any, str]] = {}
+        for identifier, label in found:
+            key = str(identifier)
+            if key not in deduped:
+                deduped[key] = (identifier, label)
+        return list(deduped.values())
+
+    async def _async_fetch_room_names_from_oauth_once(self) -> None:
+        """Fetch room names from cloud once if local payload has none."""
+        if self._cloud_room_lookup_attempted:
+            return
+        if self.model_code is None or not self.model_code.startswith("T2320"):
+            return
+        if self._attr_room_names:
+            return
+        if self.hass is None:
+            return
+
+        self._cloud_room_lookup_attempted = True
+        try:
+            cloud_rooms = await self.hass.async_add_executor_job(
+                self._fetch_room_names_from_eufy_oauth
+            )
+        except Exception as err:
+            _LOGGER.debug("Failed cloud room lookup for %s: %s", self._attr_name, err)
+            return
+
+        if cloud_rooms and self._merge_room_entries(cloud_rooms):
+            self.async_write_ha_state()
+
+    def add_room_name_listener(
+        self, listener: Callable[[], None]
+    ) -> Callable[[], None]:
+        """Register callbacks for room metadata updates."""
+        self._room_name_listeners.add(listener)
+
+        def _remove() -> None:
+            self._room_name_listeners.discard(listener)
+
+        return _remove
+
     async def async_locate(self, **kwargs: Any) -> None:
         """Locate the vacuum cleaner.
 
@@ -1102,7 +1656,10 @@ class RoboVacEntity(StateVacuumEntity):
             json_str = json.dumps(method_call, separators=(",", ":"))
             base64_str = base64.b64encode(json_str.encode("utf8")).decode("utf8")
             _LOGGER.debug("roomClean call %s", json_str)
-            await self.vacuum.async_set({TuyaCodes.ROOM_CLEAN: base64_str})
+            room_clean_code = self._get_dps_code("ROOM_CLEAN")
+            if not room_clean_code:
+                room_clean_code = TuyaCodes.ROOM_CLEAN
+            await self.vacuum.async_set({room_clean_code: base64_str})
 
     async def async_will_remove_from_hass(self) -> None:
         """Handle removal from Home Assistant."""

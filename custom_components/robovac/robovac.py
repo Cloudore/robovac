@@ -26,6 +26,7 @@ class RoboVac(TuyaDevice):
         model_details: Model-specific configuration and feature mappings
         model_code: The specific model identifier (e.g., "T2080", "L60")
     """
+
     model_details: type[RobovacModelDetails]
 
     def __init__(self, model_code: str, *args: Any, **kwargs: Any):
@@ -41,9 +42,7 @@ class RoboVac(TuyaDevice):
         """
         # Determine model_details first
         if model_code not in ROBOVAC_MODELS:
-            raise ModelNotSupportedException(
-                f"Model {model_code} is not supported"
-            )
+            raise ModelNotSupportedException(f"Model {model_code} is not supported")
         current_model_details = ROBOVAC_MODELS[model_code]
 
         super().__init__(current_model_details, *args, **kwargs)
@@ -164,6 +163,11 @@ class RoboVac(TuyaDevice):
                 # For direct values, use the value itself
                 codes[dps_name] = str(value)
 
+        model_overrides = getattr(self.model_details, "dps_codes", None)
+        if isinstance(model_overrides, Mapping):
+            for key, value in model_overrides.items():
+                codes[str(key)] = str(value)
+
         return codes
 
     def getRoboVacCommandValue(self, command_name: RobovacCommand, value: str) -> str:
@@ -183,7 +187,11 @@ class RoboVac(TuyaDevice):
         """
         try:
             # Check if command_name is already a RobovacCommand enum
-            cmd = command_name if isinstance(command_name, RobovacCommand) else RobovacCommand(command_name)
+            cmd = (
+                command_name
+                if isinstance(command_name, RobovacCommand)
+                else RobovacCommand(command_name)
+            )
             values = self._get_command_values(cmd)
 
             if values is not None and value in values:
@@ -194,7 +202,9 @@ class RoboVac(TuyaDevice):
 
         return value
 
-    def getRoboVacHumanReadableValue(self, command_name: RobovacCommand, value: str) -> str:
+    def getRoboVacHumanReadableValue(
+        self, command_name: RobovacCommand, value: str
+    ) -> str:
         """Convert model-specific device value to human-readable command value.
 
         Translates device-specific values received from the vacuum via Tuya protocol
@@ -210,7 +220,11 @@ class RoboVac(TuyaDevice):
         """
         try:
             # Check if command_name is already a RobovacCommand enum
-            cmd = command_name if isinstance(command_name, RobovacCommand) else RobovacCommand(command_name)
+            cmd = (
+                command_name
+                if isinstance(command_name, RobovacCommand)
+                else RobovacCommand(command_name)
+            )
             values = self._get_command_values(cmd)
 
             if values is not None:
