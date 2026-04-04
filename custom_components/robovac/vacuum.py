@@ -383,7 +383,13 @@ class RoboVacEntity(StateVacuumEntity):
         """Return whether the vacuum is currently charging."""
         if self._attr_tuya_state is None:
             return None
-        return str(self._attr_tuya_state).lower() in ("charging", "recharge")
+        state_lower = str(self._attr_tuya_state).lower()
+        if "charging" in state_lower or "recharge" in state_lower:
+            return True
+        # Also consider docked + not cleaning as implicitly charging
+        if self.activity == VacuumActivity.DOCKED:
+            return True
+        return False
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -435,6 +441,12 @@ class RoboVacEntity(StateVacuumEntity):
             data[ATTR_MODE] = self.mode
         if self._attr_room_names:
             data["room_names"] = self._attr_room_names
+            # HAMH-compatible simple {id: name} rooms dict
+            data["rooms"] = {
+                str(key): value.get("label", str(key))
+                for key, value in self._attr_room_names.items()
+                if isinstance(value.get("label"), str) and value["label"].isprintable()
+            }
             data.setdefault("robot_vacuum", {})["rooms"] = {
                 key: {
                     "id": value.get("id"),
