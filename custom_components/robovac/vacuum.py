@@ -51,6 +51,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import CONF_VACS, DOMAIN, PING_RATE, REFRESH_RATE, TIMEOUT
 from .eufywebapi import EufyLogon
@@ -112,7 +113,7 @@ async def async_setup_entry(
         async_add_entities([entity])
 
 
-class RoboVacEntity(StateVacuumEntity):
+class RoboVacEntity(RestoreEntity, StateVacuumEntity):
     """Home Assistant vacuum entity for Tuya-based robotic vacuum cleaners.
 
     This class implements the Home Assistant VacuumEntity interface for controlling
@@ -447,6 +448,12 @@ class RoboVacEntity(StateVacuumEntity):
                 for key, value in self._attr_room_names.items()
                 if isinstance(value.get("label"), str) and value["label"].isprintable()
             }
+            # HAMH ServiceArea-compatible segments list
+            data["segments"] = [
+                {"id": value.get("id", key), "name": value.get("label", str(key))}
+                for key, value in self._attr_room_names.items()
+                if isinstance(value.get("label"), str) and value["label"].isprintable()
+            ]
             data.setdefault("robot_vacuum", {})["rooms"] = {
                 key: {
                     "id": value.get("id"),
@@ -639,8 +646,29 @@ class RoboVacEntity(StateVacuumEntity):
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to Home Assistant.
 
-        Trigger an immediate state fetch to avoid prolonged initial Unknown state.
+        Restores previous state, then triggers an immediate state fetch.
         """
+        # Restore last known state so we don't default to docked mid-clean
+        last_state = await self.async_get_last_state()
+        if last_state is not None and last_state.state not in (None, "unavailable", "unknown"):
+            # Map HA state string back to a tuya state the activity property can use
+            _state_to_tuya = {
+                "cleaning": "Auto Cleaning",
+                "docked": "Charging",
+                "idle": "standby",
+                "paused": "Paused",
+                "returning": "Recharge",
+                "error": "error",
+            }
+            restored = _state_to_tuya.get(last_state.state)
+            if restored:
+                self._attr_tuya_state = restored
+            attrs = last_state.attributes
+            if attrs.get("battery_level") is not None:
+                self._attr_battery_level = attrs["battery_level"]
+            if attrs.get("fan_speed"):
+                self._attr_fan_speed = attrs["fan_speed"]
+
         try:
             # First attempt at fetching state
             await self.async_update()
