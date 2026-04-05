@@ -1776,23 +1776,87 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             #   app_segment_clean (HAMH/Roborock): params=[17] or params=[17, 18]
             if isinstance(params, list):
                 room_ids = [int(r) if str(r).isdigit() else r for r in params]
-                count = 1
             else:
-                room_ids = params.get("roomIds", [1])
-                count = params.get("count", 1)
-            clean_request = {"roomIds": room_ids, "cleanTimes": count}
-            method_call = {
-                "method": "selectRoomsClean",
-                "data": clean_request,
-                "timestamp": round(time.time() * 1000),
-            }
-            json_str = json.dumps(method_call, separators=(",", ":"))
-            base64_str = base64.b64encode(json_str.encode("utf8")).decode("utf8")
-            _LOGGER.debug("roomClean call %s", json_str)
+                room_ids = [int(r) for r in params.get("roomIds", [1])]
+
             room_clean_code = self._get_dps_code("ROOM_CLEAN")
             if not room_clean_code:
                 room_clean_code = TuyaCodes.ROOM_CLEAN
-            await self.vacuum.async_set({room_clean_code: base64_str})
+
+            if self.model_code and self.model_code.startswith("T2320"):
+                # T2320 uses protobuf encoding for room clean commands
+                payload = self._build_room_clean_protobuf(room_ids)
+                _LOGGER.debug("roomClean protobuf for rooms %s: %s", room_ids, payload)
+                await self.vacuum.async_set({room_clean_code: payload})
+                # Trigger cleaning via MODE DPS after setting room selection
+                mode_code = self._get_dps_code("MODE")
+                if mode_code:
+                    auto_value = self.vacuum.getRoboVacCommandValue(
+                        RobovacCommand.MODE, "auto"
+                    )
+                    if auto_value:
+                        await self.vacuum.async_set({mode_code: auto_value})
+            else:
+                # Other models use JSON encoding
+                count = 1
+                if isinstance(params, dict):
+                    count = params.get("count", 1)
+                clean_request = {"roomIds": room_ids, "cleanTimes": count}
+                method_call = {
+                    "method": "selectRoomsClean",
+                    "data": clean_request,
+                    "timestamp": round(time.time() * 1000),
+                }
+                json_str = json.dumps(method_call, separators=(",", ":"))
+                base64_str = base64.b64encode(json_str.encode("utf8")).decode("utf8")
+                _LOGGER.debug("roomClean call %s", json_str)
+                await self.vacuum.async_set({room_clean_code: base64_str})
+
+    @staticmethod
+    def _build_room_clean_protobuf(room_ids: list[int]) -> str:
+        """Build a protobuf-encoded room clean payload for T2320.
+
+        The T2320 expects a protobuf message on DPS 168 with a single
+        room entry containing the room ID in fields 1-5, a cleaning mode
+        in field 6, and a timestamp in field 20.
+
+        Captured from eufy app: room 6 produces
+        JQojCgIIBhICCAYaAggGIgIIBioCCAYyAggEoAHggJme/rjW0Rg=
+        """
+
+        def _encode_varint(value: int) -> bytes:
+            result = bytearray()
+            while value > 0x7F:
+                result.append((value & 0x7F) | 0x80)
+                value >>= 7
+            result.append(value & 0x7F)
+            return bytes(result)
+
+        def _encode_field_varint(field_num: int, value: int) -> bytes:
+            tag = (field_num << 3) | 0  # wire type 0 = varint
+            return _encode_varint(tag) + _encode_varint(value)
+
+        def _encode_field_bytes(field_num: int, data: bytes) -> bytes:
+            tag = (field_num << 3) | 2  # wire type 2 = length-delimited
+            return _encode_varint(tag) + _encode_varint(len(data)) + data
+
+        # Use the first room ID for the room entry
+        rid = room_ids[0] if room_ids else 1
+
+        # Build the room entry (fields 1-5 = room_id, field 6 = 4, field 20 = timestamp)
+        room_entry = b""
+        for field_num in range(1, 6):
+            room_entry += _encode_field_bytes(field_num, _encode_field_varint(1, rid))
+        room_entry += _encode_field_bytes(6, _encode_field_varint(1, 4))
+        room_entry += _encode_field_varint(20, round(time.time() * 1000))
+
+        # Wrap in top-level field 1
+        message = _encode_field_bytes(1, room_entry)
+
+        # Add length prefix
+        payload = _encode_varint(len(message)) + message
+
+        return base64.b64encode(payload).decode("utf8")
 
     async def async_will_remove_from_hass(self) -> None:
         """Handle removal from Home Assistant."""
