@@ -1770,9 +1770,16 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
             # Toggle the boost IQ setting
             new_value = not self._is_value_true(self.boost_iq)
             await self.vacuum.async_set({self._get_dps_code("BOOST_IQ"): new_value})
-        elif command == "roomClean" and params is not None and isinstance(params, dict):
-            room_ids = params.get("roomIds", [1])
-            count = params.get("count", 1)
+        elif command in ("roomClean", "app_segment_clean") and params is not None:
+            # Normalize params from different callers:
+            #   roomClean: params={"roomIds": [17], "count": 1}
+            #   app_segment_clean (HAMH/Roborock): params=[17] or params=[17, 18]
+            if isinstance(params, list):
+                room_ids = [int(r) if str(r).isdigit() else r for r in params]
+                count = 1
+            else:
+                room_ids = params.get("roomIds", [1])
+                count = params.get("count", 1)
             clean_request = {"roomIds": room_ids, "cleanTimes": count}
             method_call = {
                 "method": "selectRoomsClean",
