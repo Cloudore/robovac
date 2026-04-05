@@ -1784,18 +1784,21 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
                 room_clean_code = TuyaCodes.ROOM_CLEAN
 
             if self.model_code and self.model_code.startswith("T2320"):
-                # T2320 uses protobuf encoding for room clean commands
+                # T2320 uses protobuf encoding for room clean commands.
+                # Write room selection (DPS 168) and auto mode (DPS 152)
+                # simultaneously to trigger room-specific cleaning.
                 payload = self._build_room_clean_protobuf(room_ids)
                 _LOGGER.debug("roomClean protobuf for rooms %s: %s", room_ids, payload)
-                await self.vacuum.async_set({room_clean_code: payload})
-                # Trigger cleaning via MODE DPS after setting room selection
                 mode_code = self._get_dps_code("MODE")
-                if mode_code:
+                auto_value = None
+                if mode_code and self.vacuum is not None:
                     auto_value = self.vacuum.getRoboVacCommandValue(
                         RobovacCommand.MODE, "auto"
                     )
-                    if auto_value:
-                        await self.vacuum.async_set({mode_code: auto_value})
+                dps_cmd = {room_clean_code: payload}
+                if mode_code and auto_value:
+                    dps_cmd[mode_code] = auto_value
+                await self.vacuum.async_set(dps_cmd)
             else:
                 # Other models use JSON encoding
                 count = 1

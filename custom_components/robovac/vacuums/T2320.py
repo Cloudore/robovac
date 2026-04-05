@@ -107,6 +107,9 @@ class T2320(RobovacModelDetails):
         "Fully Charged": VacuumActivity.DOCKED,
         "Auto Cleaning": VacuumActivity.CLEANING,
         "standby": VacuumActivity.IDLE,
+        # Room cleaning statuses captured from eufy app
+        "CBAFGgA6AhAC": VacuumActivity.CLEANING,
+        "EgoCCAEQBRoAMgByBhoCCAEiAA==": VacuumActivity.CLEANING,
     }
 
     dps_codes = {
