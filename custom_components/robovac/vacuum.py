@@ -51,6 +51,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import CONF_VACS, DOMAIN, PING_RATE, REFRESH_RATE, TIMEOUT
 from .eufywebapi import EufyLogon
@@ -112,7 +113,7 @@ async def async_setup_entry(
         async_add_entities([entity])
 
 
-class RoboVacEntity(StateVacuumEntity):
+class RoboVacEntity(RestoreEntity, StateVacuumEntity):
     """Home Assistant vacuum entity for Tuya-based robotic vacuum cleaners.
 
     This class implements the Home Assistant VacuumEntity interface for controlling
@@ -383,7 +384,13 @@ class RoboVacEntity(StateVacuumEntity):
         """Return whether the vacuum is currently charging."""
         if self._attr_tuya_state is None:
             return None
-        return str(self._attr_tuya_state).lower() in ("charging", "recharge")
+        state_lower = str(self._attr_tuya_state).lower()
+        if "charging" in state_lower or "recharge" in state_lower:
+            return True
+        # Also consider docked + not cleaning as implicitly charging
+        if self.activity == VacuumActivity.DOCKED:
+            return True
+        return False
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -435,6 +442,18 @@ class RoboVacEntity(StateVacuumEntity):
             data[ATTR_MODE] = self.mode
         if self._attr_room_names:
             data["room_names"] = self._attr_room_names
+            # HAMH-compatible simple {id: name} rooms dict
+            data["rooms"] = {
+                str(key): value.get("label", str(key))
+                for key, value in self._attr_room_names.items()
+                if isinstance(value.get("label"), str) and value["label"].isprintable()
+            }
+            # HAMH ServiceArea-compatible segments list
+            data["segments"] = [
+                {"id": value.get("id", key), "name": value.get("label", str(key))}
+                for key, value in self._attr_room_names.items()
+                if isinstance(value.get("label"), str) and value["label"].isprintable()
+            ]
             data.setdefault("robot_vacuum", {})["rooms"] = {
                 key: {
                     "id": value.get("id"),
@@ -627,8 +646,29 @@ class RoboVacEntity(StateVacuumEntity):
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to Home Assistant.
 
-        Trigger an immediate state fetch to avoid prolonged initial Unknown state.
+        Restores previous state, then triggers an immediate state fetch.
         """
+        # Restore last known state so we don't default to docked mid-clean
+        last_state = await self.async_get_last_state()
+        if last_state is not None and last_state.state not in (None, "unavailable", "unknown"):
+            # Map HA state string back to a tuya state the activity property can use
+            _state_to_tuya = {
+                "cleaning": "Auto Cleaning",
+                "docked": "Charging",
+                "idle": "standby",
+                "paused": "Paused",
+                "returning": "Recharge",
+                "error": "error",
+            }
+            restored = _state_to_tuya.get(last_state.state)
+            if restored:
+                self._attr_tuya_state = restored
+            attrs = last_state.attributes
+            if attrs.get("battery_level") is not None:
+                self._attr_battery_level = attrs["battery_level"]
+            if attrs.get("fan_speed"):
+                self._attr_fan_speed = attrs["fan_speed"]
+
         try:
             # First attempt at fetching state
             await self.async_update()
@@ -1367,28 +1407,54 @@ class RoboVacEntity(StateVacuumEntity):
             for identifier, label in extracted
         }
 
-    def _fetch_room_names_from_tuya_cloud(self) -> dict[str, dict[str, Any]]:
-        """Fetch room names for T2320 from Tuya cloud DPS payloads."""
+    def _build_tuya_session_sync(self) -> "TuyaAPISession | None":
+        """Authenticate with Eufy and return a ready TuyaAPISession.
+
+        Performs blocking network I/O — must be called from a thread
+        (e.g. via hass.async_add_executor_job), not from the event loop.
+
+        Returns:
+            A TuyaAPISession whose session will be lazily acquired on the
+            first request, or None if credentials are missing or login fails.
+        """
         username = self._eufy_username
         password = self._eufy_password
         if not username or not password:
-            return {}
+            return None
 
-        eufy_session = EufyLogon(username, password)
-        response = eufy_session.get_user_info()
+        try:
+            eufy_session = EufyLogon(username, password)
+            response = eufy_session.get_user_info()
+        except Exception as err:
+            _LOGGER.warning("T2320 cloud session: Eufy get_user_info raised: %s", err)
+            return None
+
         if response is None or response.status_code != 200:
-            return {}
+            _LOGGER.warning(
+                "T2320 cloud session: Eufy login failed (status=%s)",
+                getattr(response, "status_code", "no response"),
+            )
+            return None
 
         user_response = response.json()
         if user_response.get("res_code") != 1:
-            return {}
+            _LOGGER.warning(
+                "T2320 cloud session: Eufy login rejected (res_code=%s)",
+                user_response.get("res_code"),
+            )
+            return None
 
         user_info = user_response.get("user_info", {})
         request_host = user_info.get("request_host")
         user_id = user_info.get("id")
         access_token = user_response.get("access_token")
         if not request_host or not user_id or not access_token:
-            return {}
+            _LOGGER.warning(
+                "T2320 cloud session: missing fields "
+                "(request_host=%s user_id=%s access_token=%s)",
+                bool(request_host), bool(user_id), bool(access_token),
+            )
+            return None
 
         settings_response = eufy_session.get_user_settings(
             request_host,
@@ -1408,12 +1474,37 @@ class RoboVacEntity(StateVacuumEntity):
         phone_code = user_info.get("phone_code") or "44"
         timezone = user_info.get("timezone") or "Europe/London"
 
-        tuya_session = TuyaAPISession(
+        return TuyaAPISession(
             username=f"eh-{user_id}",
             region=region,
             timezone=timezone,
             phone_code=phone_code,
         )
+
+    def _cloud_get_all_dps(self) -> dict[str, Any]:
+        """Fetch all DPS from Tuya cloud (blocking; call via executor).
+
+        Used as a fallback when the local TCP push hasn't sent us DPS 164
+        (auth_data) or DPS 165 (position map) yet — both are required to
+        build the LOCAL room-clean command for T2320.
+        """
+        tuya_session = self._build_tuya_session_sync()
+        if tuya_session is None:
+            return {}
+        try:
+            return tuya_session._request(
+                action="tuya.m.device.dp.get",
+                version="1.0",
+                data={"devId": str(self.unique_id)},
+            )
+        except Exception:  # pylint: disable=broad-except
+            return {}
+
+    def _fetch_room_names_from_tuya_cloud(self) -> dict[str, dict[str, Any]]:
+        """Fetch room names for T2320 from Tuya cloud DPS payloads."""
+        tuya_session = self._build_tuya_session_sync()
+        if tuya_session is None:
+            return {}
 
         try:
             dps = tuya_session._request(
@@ -1438,6 +1529,488 @@ class RoboVacEntity(StateVacuumEntity):
         for entry in parsed_fallback.values():
             entry["source"] = "cloud"
         return parsed_fallback
+
+    def _resolve_device_room_ids(self, room_ids: list[int]) -> list[int]:
+        """Map potentially-cloud room IDs to device-internal room IDs.
+
+        HAMH may send cloud-assigned IDs (e.g. 17 from the Eufy OAuth API)
+        while the device protobuf needs device-internal IDs (e.g. 6, as seen
+        in DPS 165 and DPS 168 captures). Both sets are in _room_name_registry
+        keyed by their respective IDs. Device-internal IDs are always smaller
+        integers (1–15 range), so for any ID that has a same-label duplicate
+        with a lower numeric value we prefer the lower one.
+
+        Must be called from the async context (not a thread) since it reads
+        _room_name_registry.
+        """
+        if not self._room_name_registry:
+            return room_ids
+
+        resolved: list[int] = []
+        for room_id in room_ids:
+            entry = self._room_name_registry.get(str(room_id))
+            if entry is None:
+                resolved.append(room_id)
+                continue
+
+            label = (entry.get("label") or "").strip().lower()
+            best_id = room_id
+
+            if label:
+                for candidate in self._room_name_registry.values():
+                    if (candidate.get("label") or "").strip().lower() != label:
+                        continue
+                    cid = candidate.get("id")
+                    if isinstance(cid, int) and cid < best_id:
+                        best_id = cid
+
+            if best_id != room_id:
+                _LOGGER.debug(
+                    "T2320 room ID: resolved %s → %s (label=%s)",
+                    room_id, best_id, entry.get("label"),
+                )
+            resolved.append(best_id)
+
+        return resolved
+
+    def _cloud_trigger_room_clean_sync(self, room_ids: list[int]) -> bool:
+        """Trigger room-specific cleaning on T2320 via Tuya cloud DPS publish.
+
+        The T2320 uses DPS 164 as the room-clean command. Confirmed from device
+        logs: when the Eufy app starts a room/segment clean, DPS 164 updates
+        first (with room_id + constant auth data), and then the device
+        self-transitions DPS 152 to "AggB" and starts cleaning. Sending
+        DPS 152="AggB" directly does NOT trigger cleaning.
+
+        DPS 164 structure (length-prefixed protobuf):
+          field 1 (varint): room_id   (= DPS 168 device room_id - 1)
+          field 2 (varint): room_id   (same)
+          field 3 (bytes):  empty
+          field 4 (bytes):  constant auth data (140 bytes, user+device specific)
+
+        The auth data is extracted from the device's current DPS 164 state.
+        If not available (first use), falls back to old DPS 168 approach.
+
+        Performs blocking network I/O — call via hass.async_add_executor_job.
+
+        Args:
+            room_ids: Room IDs to clean (cloud IDs, Tuya translates for DPS 168).
+
+        Returns:
+            True if the cloud command was sent successfully, False otherwise.
+        """
+        tuya_session = self._build_tuya_session_sync()
+        if tuya_session is None:
+            _LOGGER.warning(
+                "T2320 cloud room clean: no Eufy credentials available"
+            )
+            return False
+
+        # Try the DPS 164 approach (confirmed working from device log capture)
+        dps164_result = self._cloud_trigger_room_clean_dps164_sync(
+            tuya_session, room_ids
+        )
+        if dps164_result is not None:
+            return dps164_result
+
+        # Fall back: DPS 168 only (sets room target but may not trigger clean)
+        _LOGGER.debug(
+            "T2320 cloud room clean: DPS 164 not available, "
+            "falling back to DPS 168 for rooms=%s", room_ids
+        )
+        payload = self._build_room_clean_protobuf(room_ids)
+        room_clean_code = self._get_dps_code("ROOM_CLEAN") or "168"
+        try:
+            tuya_session.publish_dps(
+                str(self.unique_id),
+                {str(room_clean_code): payload},
+            )
+            _LOGGER.info(
+                "T2320 cloud room clean: DPS 168 fallback sent for rooms=%s",
+                room_ids,
+            )
+            return True
+        except Exception as err:
+            _LOGGER.warning(
+                "T2320 cloud room clean: DPS 168 fallback failed: %s", err
+            )
+            return False
+
+    def _cloud_trigger_room_clean_dps164_sync(
+        self,
+        tuya_session: Any,
+        room_ids: list[int],
+    ) -> bool | None:
+        """Attempt room clean via DPS 164 (the real Eufy room-clean command).
+
+        Returns True on success, False on publish failure, None if DPS 164
+        auth data is not yet available in device state (first use — user
+        should trigger one room clean from the Eufy app first).
+        """
+        # DPS 164 is not broadcast locally — fetch from cloud.
+        # DPS 165 (room metadata) maps cloud room IDs to their 1-based position
+        # in the room list, which is the room_id to embed in DPS 164.
+        # Confirmed: Kitchen cloud_id=17 is at position 6 in DPS 165, and the
+        # Eufy-app DPS 164 for a Kitchen clean has room_id=6.
+        device_state = self.vacuum.state if self.vacuum else {}
+        dps164_raw = device_state.get("164")
+        dps165_raw = device_state.get("165")
+
+        if not dps164_raw or not dps165_raw:
+            _LOGGER.debug("T2320 DPS 164/165 not fully in local state — fetching from Tuya cloud")
+            try:
+                cloud_dps = tuya_session._request(
+                    "tuya.m.device.dp.get", "1.0",
+                    {"devId": str(self.unique_id)},
+                )
+                if not dps164_raw:
+                    dps164_raw = cloud_dps.get("164")
+                if not dps165_raw:
+                    dps165_raw = cloud_dps.get("165")
+            except Exception as err:
+                _LOGGER.warning("T2320 cloud DPS fetch failed: %s", err)
+
+        if not dps164_raw:
+            _LOGGER.warning(
+                "T2320 DPS 164 not available — trigger one room clean from the Eufy app first"
+            )
+            return None
+
+        parsed = self._extract_dps164_fields(str(dps164_raw))
+        if parsed is None:
+            _LOGGER.warning("T2320 DPS 164 parse failed (raw=%s)", dps164_raw)
+            return None
+        captured_room_id, auth_data = parsed
+
+        # Determine DPS 164 room_id from the 1-based position of the requested
+        # cloud room ID in the DPS 165 room list. Fall back to the room_id
+        # captured in the existing DPS 164 if DPS 165 is unavailable.
+        dps164_room_id: int | None = None
+        if dps165_raw and room_ids:
+            position_map = self._parse_dps165_position_map(str(dps165_raw))
+            requested_id = room_ids[0]
+            dps164_room_id = position_map.get(requested_id)
+            if dps164_room_id is not None:
+                _LOGGER.debug(
+                    "T2320 DPS 164: cloud_id=%d → position=%d from DPS 165 for rooms=%s",
+                    requested_id, dps164_room_id, room_ids,
+                )
+            else:
+                _LOGGER.debug(
+                    "T2320 DPS 164: cloud_id=%d not found in DPS 165 map=%s",
+                    requested_id, position_map,
+                )
+
+        if dps164_room_id is None:
+            dps164_room_id = captured_room_id
+            _LOGGER.debug(
+                "T2320 DPS 164: no DPS 165 position, using captured room_id=%d for rooms=%s",
+                dps164_room_id, room_ids,
+            )
+
+        dps164_payload = self._build_dps164(dps164_room_id, auth_data)
+        _LOGGER.debug(
+            "T2320 DPS 164 room clean: room_id=%d payload=%s",
+            dps164_room_id, dps164_payload,
+        )
+
+        try:
+            tuya_session.publish_dps(
+                str(self.unique_id),
+                {"164": dps164_payload},
+            )
+            _LOGGER.info(
+                "T2320 cloud room clean (DPS 164): command sent for rooms=%s "
+                "dps164_room_id=%d",
+                room_ids, dps164_room_id,
+            )
+            return True
+        except Exception as err:
+            _LOGGER.warning("T2320 cloud room clean (DPS 164): publish failed: %s", err)
+            return False
+
+    @staticmethod
+    def _extract_dps164_fields(dps164_b64: str) -> tuple[int, bytes] | None:
+        """Extract room_id and auth bytes from a DPS 164 value.
+
+        DPS 164 structure (length-prefixed protobuf):
+          length_prefix (varint)
+          field 1 (varint): room_id
+          field 2 (varint): room_id  (same value)
+          field 3 (bytes):  empty
+          field 4 (bytes):  auth_data (140 bytes, constant per user+device)
+
+        Returns (room_id, auth_data) or None on parse failure.
+        """
+        try:
+            data = base64.b64decode(dps164_b64 + "==")
+
+            def _varint(d: bytes, p: int) -> tuple[int, int]:
+                r, s = 0, 0
+                while p < len(d):
+                    b = d[p]; p += 1
+                    r |= (b & 0x7F) << s; s += 7
+                    if not (b & 0x80): break
+                return r, p
+
+            # Skip length prefix
+            _, pos = _varint(data, 0)
+            # Read field 1 (tag + varint room_id)
+            _, pos = _varint(data, pos)   # tag (0x08)
+            room_id, pos = _varint(data, pos)
+            # Skip field 2 (tag + varint, same room_id)
+            _, pos = _varint(data, pos)
+            _, pos = _varint(data, pos)
+            # Skip field 3 (tag + empty bytes)
+            _, pos = _varint(data, pos)
+            f3_len, pos = _varint(data, pos)
+            pos += f3_len
+            # Read field 4 (tag + length + auth bytes)
+            _, pos = _varint(data, pos)
+            f4_len, pos = _varint(data, pos)
+            return room_id, data[pos:pos + f4_len]
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_dps168_room_id(dps168_b64: str) -> int | None:
+        """Extract the device room_id from a DPS 168 value.
+
+        DPS 168 structure: length_prefix + outer_field_1(bytes) + inner_message.
+        The inner message has fields 1-5, each being a bytes sub-message with
+        sub-field 1 (varint) = device_room_id. Fields 1, 3, 5 may be empty;
+        the room_id is typically in field 2 or 4.
+        """
+        try:
+            data = base64.b64decode(dps168_b64 + "==")
+
+            def _varint(d: bytes, p: int) -> tuple[int, int]:
+                r, s = 0, 0
+                while p < len(d):
+                    b = d[p]; p += 1
+                    r |= (b & 0x7F) << s; s += 7
+                    if not (b & 0x80): break
+                return r, p
+
+            # Skip length prefix
+            _, pos = _varint(data, 0)
+            # Read outer field 1 (wraps the entire inner message)
+            _, pos = _varint(data, pos)   # tag (field 1, wt 2)
+            inner_len, pos = _varint(data, pos)
+            inner = data[pos:pos + inner_len]
+
+            # Parse inner message for fields 1-5 (sub-messages with room_id)
+            ipos = 0
+            while ipos < len(inner):
+                tag, ipos = _varint(inner, ipos)
+                wt = tag & 0x7
+                fn = tag >> 3
+                if wt == 2:
+                    length, ipos = _varint(inner, ipos)
+                    sub = inner[ipos:ipos + length]
+                    ipos += length
+                    if fn in (1, 2, 3, 4, 5) and length >= 2:
+                        sub_tag, sp = _varint(sub, 0)
+                        if sub_tag == 8:  # field 1, varint
+                            room_id, _ = _varint(sub, sp)
+                            if room_id > 0:
+                                return room_id
+                elif wt == 0:
+                    _, ipos = _varint(inner, ipos)
+                else:
+                    break
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _build_mode_ctrl_room_clean(
+        room_ids: list[int],
+        map_id: int = 15,
+        clean_times: int = 1,
+    ) -> str:
+        """Build a ModeCtrlRequest protobuf for room cleaning, base64-encoded.
+
+        Schema reference: proto/cloud/control.proto in
+        GijsKruize/eufy-clean (which sources from the Eufy app).
+
+            ModeCtrlRequest {
+                Method method = 1;          // 1 = START_SELECT_ROOMS_CLEAN
+                oneof Param {
+                    SelectRoomsClean select_rooms_clean = 4;
+                }
+            }
+            SelectRoomsClean {
+                repeated Room rooms = 1;    // {id, order}
+                uint32 clean_times = 2;
+                uint32 map_id = 3;
+                Mode mode = 5;              // 0 = GENERAL
+            }
+        """
+
+        def _varint(v: int) -> bytes:
+            r = bytearray()
+            while v > 0x7F:
+                r.append((v & 0x7F) | 0x80)
+                v >>= 7
+            r.append(v)
+            return bytes(r)
+
+        def _fv(fn: int, v: int) -> bytes:
+            return _varint((fn << 3) | 0) + _varint(v)
+
+        def _fb(fn: int, d: bytes) -> bytes:
+            return _varint((fn << 3) | 2) + _varint(len(d)) + d
+
+        # SelectRoomsClean inner
+        src = b""
+        for idx, rid in enumerate(room_ids, start=1):
+            room = _fv(1, rid) + _fv(2, idx)
+            src += _fb(1, room)
+        if clean_times:
+            src += _fv(2, clean_times)
+        if map_id:
+            src += _fv(3, map_id)
+        # mode = 0 (GENERAL) -- default, not encoded
+
+        # ModeCtrlRequest outer: method=1 (START_SELECT_ROOMS_CLEAN), then
+        # select_rooms_clean as oneof Param field 4.
+        inner = _fv(1, 1) + _fb(4, src)
+
+        # DPS 152 values are length-prefixed (matches AUTO 'BBoCCAE=').
+        payload = _varint(len(inner)) + inner
+        return base64.b64encode(payload).decode()
+
+    @staticmethod
+    def _extract_dps165_meta_id(dps165_b64: str) -> int | None:
+        """Extract the map's meta_field (a varint at field 1 of the inner
+        room-list message) from a DPS 165 value. This is the map_id the
+        device uses to validate room-clean commands.
+        """
+        try:
+            data = base64.b64decode(dps165_b64 + "==")
+
+            def _v(d: bytes, p: int) -> tuple[int, int]:
+                r, s = 0, 0
+                while p < len(d):
+                    b = d[p]
+                    p += 1
+                    r |= (b & 0x7F) << s
+                    s += 7
+                    if not (b & 0x80):
+                        break
+                return r, p
+
+            # Outer length prefix
+            _, pos = _v(data, 0)
+            # Outer field 1 (the only top-level field)
+            _, pos = _v(data, pos)            # tag
+            inner_len, pos = _v(data, pos)
+            inner = data[pos:pos + inner_len]
+
+            # Walk inner: meta_field is a leading varint field 1.
+            ipos = 0
+            while ipos < len(inner):
+                tag, ipos = _v(inner, ipos)
+                wt = tag & 0x7
+                fn = tag >> 3
+                if wt == 0:
+                    val, ipos = _v(inner, ipos)
+                    if fn == 1:
+                        return val
+                elif wt == 2:
+                    sl, ipos = _v(inner, ipos)
+                    ipos += sl
+                else:
+                    break
+        except Exception:  # pylint: disable=broad-except
+            pass
+        return None
+
+    @staticmethod
+    def _build_dps164(room_id: int, auth_data: bytes) -> str:
+        """Build a DPS 164 payload for the given room_id and auth data.
+
+        DPS 164 structure (length-prefixed protobuf):
+          field 1 (varint): room_id
+          field 2 (varint): room_id
+          field 3 (bytes):  empty
+          field 4 (bytes):  auth_data (140 bytes, constant per user+device)
+        """
+        def _varint(v: int) -> bytes:
+            r = bytearray()
+            while v > 0x7F: r.append((v & 0x7F) | 0x80); v >>= 7
+            r.append(v); return bytes(r)
+
+        def _fv(fn: int, v: int) -> bytes:
+            return _varint((fn << 3) | 0) + _varint(v)
+
+        def _fb(fn: int, d: bytes) -> bytes:
+            return _varint((fn << 3) | 2) + _varint(len(d)) + d
+
+        inner = _fv(1, room_id) + _fv(2, room_id) + _fb(3, b"") + _fb(4, auth_data)
+        payload = _varint(len(inner)) + inner
+        return base64.b64encode(payload).decode()
+
+    @staticmethod
+    def _parse_dps165_position_map(dps165_b64: str) -> dict[int, int]:
+        """Build a cloud_id → 1-based-position map from a DPS 165 value.
+
+        DPS 165 contains an ordered list of named rooms. The 1-based position
+        of each room in this list is the room_id to embed in DPS 164 when
+        triggering a room clean. Confirmed: Kitchen is at position 6 in DPS 165
+        and the captured Eufy-app DPS 164 for Kitchen has room_id=6.
+
+        Returns an empty dict on parse failure.
+        """
+        try:
+            data = base64.b64decode(dps165_b64 + "==")
+
+            def _varint(d: bytes, p: int) -> tuple[int, int]:
+                r, s = 0, 0
+                while p < len(d):
+                    b = d[p]; p += 1
+                    r |= (b & 0x7F) << s; s += 7
+                    if not (b & 0x80): break
+                return r, p
+
+            # Length prefix + outer field 1 (bytes) wraps the inner room list
+            _, pos = _varint(data, 0)
+            _, pos = _varint(data, pos)       # outer tag
+            inner_len, pos = _varint(data, pos)
+            inner = data[pos:pos + inner_len]
+
+            position_map: dict[int, int] = {}
+            position = 0
+            ipos = 0
+            while ipos < len(inner):
+                t, ipos = _varint(inner, ipos)
+                wt = t & 0x7; fn = t >> 3
+                if wt == 0:
+                    _, ipos = _varint(inner, ipos)
+                elif wt == 2:
+                    l, ipos = _varint(inner, ipos)
+                    sub = inner[ipos:ipos + l]; ipos += l
+                    if fn == 2:   # room entry field
+                        position += 1
+                        sipos = 0
+                        while sipos < len(sub):
+                            st, sipos = _varint(sub, sipos)
+                            swt = st & 0x7; sfn = st >> 3
+                            if swt == 0:
+                                v, sipos = _varint(sub, sipos)
+                                if sfn == 1:  # cloud_id
+                                    position_map[v] = position
+                            elif swt == 2:
+                                sl, sipos = _varint(sub, sipos)
+                                sipos += sl
+                            else:
+                                break
+                else:
+                    break
+            return position_map
+        except Exception:
+            return {}
 
     def _search_nested_room_lists(self, value: Any) -> list[tuple[Any, str]]:
         """Find likely room lists in nested JSON payloads."""
@@ -1730,22 +2303,152 @@ class RoboVacEntity(StateVacuumEntity):
             # Toggle the boost IQ setting
             new_value = not self._is_value_true(self.boost_iq)
             await self.vacuum.async_set({self._get_dps_code("BOOST_IQ"): new_value})
-        elif command == "roomClean" and params is not None and isinstance(params, dict):
-            room_ids = params.get("roomIds", [1])
-            count = params.get("count", 1)
-            clean_request = {"roomIds": room_ids, "cleanTimes": count}
-            method_call = {
-                "method": "selectRoomsClean",
-                "data": clean_request,
-                "timestamp": round(time.time() * 1000),
-            }
-            json_str = json.dumps(method_call, separators=(",", ":"))
-            base64_str = base64.b64encode(json_str.encode("utf8")).decode("utf8")
-            _LOGGER.debug("roomClean call %s", json_str)
+        elif command in ("roomClean", "app_segment_clean") and params is not None:
+            # Normalize params from different callers:
+            #   roomClean: params={"roomIds": [17], "count": 1}
+            #   app_segment_clean (HAMH/Roborock): params=[17] or params=[17, 18]
+            if isinstance(params, list):
+                room_ids = [int(r) if str(r).isdigit() else r for r in params]
+            else:
+                room_ids = [int(r) for r in params.get("roomIds", [1])]
+
             room_clean_code = self._get_dps_code("ROOM_CLEAN")
             if not room_clean_code:
                 room_clean_code = TuyaCodes.ROOM_CLEAN
-            await self.vacuum.async_set({room_clean_code: base64_str})
+
+            if self.model_code and self.model_code.startswith("T2320"):
+                # T2320 room clean: build a Eufy "novel API" ModeCtrlRequest
+                # protobuf and write it to DPS 152 via LOCAL Tuya TCP.
+                #
+                # Confirmed working with Eufy RoboVac X9 Pro firmware 1.5.23.
+                # Schema (from martijnpoppen/eufy-clean and the proto/cloud/
+                # control.proto in GijsKruize/eufy-clean SDK):
+                #
+                #   ModeCtrlRequest {
+                #     method = 1   // START_SELECT_ROOMS_CLEAN
+                #     select_rooms_clean = SelectRoomsClean {
+                #       rooms       = [{id=<cloud_room_id>, order=<idx+1>}]
+                #       clean_times = 1
+                #       map_id      = <from DPS 165 meta_field, default 15>
+                #       mode        = 0  // GENERAL (default, omitted)
+                #     }
+                #   }
+                #   → base64 → DPS 152
+                #
+                # Why the previous approaches failed:
+                #   - Writing DPS 152 = "AggB" alone is just a bare {f1: 1}
+                #     ModeCtrlRequest with no Param payload. The device
+                #     normalizes that to "BAgBGAE=" and ignores it.
+                #   - DPS 164 turns out to be a *status report* the device
+                #     pushes ("I'm cleaning room N"), not a command channel.
+                #   - DPS 168 is route/path data, not a command channel.
+                #
+                # The protobuf write below is the actual command the Eufy
+                # app issues; the device echoes back DPS 152 = "AggB" as a
+                # status indicator (matching what the app's local Tuya
+                # listener observes during a working room clean).
+
+                # Pull DPS 165 from local cache or cloud fallback so we can
+                # parse the device's map_id (the meta_field at the head of
+                # DPS 165). Without a valid map_id the device accepts the
+                # write but bails on execution.
+                state = self.vacuum.state if self.vacuum else {}
+                dps165_raw = state.get("165")
+                if not dps165_raw:
+                    try:
+                        cloud_dps = await self.hass.async_add_executor_job(
+                            self._cloud_get_all_dps
+                        )
+                    except Exception as err:  # pylint: disable=broad-except
+                        _LOGGER.debug(
+                            "T2320 roomClean: cloud DPS fetch failed: %s",
+                            err,
+                        )
+                        cloud_dps = {}
+                    dps165_raw = cloud_dps.get("165")
+
+                map_id = (
+                    self._extract_dps165_meta_id(str(dps165_raw))
+                    if dps165_raw
+                    else None
+                ) or 15  # observed value for X9 Pro on this account
+
+                payload_b64 = self._build_mode_ctrl_room_clean(
+                    [int(r) for r in room_ids],
+                    map_id=map_id,
+                )
+                _LOGGER.info(
+                    "T2320 roomClean: rooms=%s map_id=%s — writing local "
+                    "DPS 152 ModeCtrlRequest protobuf (%s)",
+                    room_ids, map_id, payload_b64,
+                )
+                await self.vacuum.async_set({"152": payload_b64})
+            else:
+                # Other models use JSON encoding
+                count = 1
+                if isinstance(params, dict):
+                    count = params.get("count", 1)
+                clean_request = {"roomIds": room_ids, "cleanTimes": count}
+                method_call = {
+                    "method": "selectRoomsClean",
+                    "data": clean_request,
+                    "timestamp": round(time.time() * 1000),
+                }
+                json_str = json.dumps(method_call, separators=(",", ":"))
+                base64_str = base64.b64encode(json_str.encode("utf8")).decode("utf8")
+                _LOGGER.debug("roomClean call %s", json_str)
+                await self.vacuum.async_set({room_clean_code: base64_str})
+
+    @staticmethod
+    def _build_room_clean_protobuf(room_ids: list[int]) -> str:
+        """Build a protobuf-encoded room clean payload for T2320.
+
+        The T2320 expects a protobuf message on DPS 168 with a single
+        room entry containing the room ID in fields 1-5, a cleaning mode
+        in field 6, and a timestamp in field 20.
+
+        Captured from eufy app: room 6 produces
+        JQojCgIIBhICCAYaAggGIgIIBioCCAYyAggEoAHggJme/rjW0Rg=
+        """
+
+        def _encode_varint(value: int) -> bytes:
+            result = bytearray()
+            while value > 0x7F:
+                result.append((value & 0x7F) | 0x80)
+                value >>= 7
+            result.append(value & 0x7F)
+            return bytes(result)
+
+        def _encode_field_varint(field_num: int, value: int) -> bytes:
+            tag = (field_num << 3) | 0  # wire type 0 = varint
+            return _encode_varint(tag) + _encode_varint(value)
+
+        def _encode_field_bytes(field_num: int, data: bytes) -> bytes:
+            tag = (field_num << 3) | 2  # wire type 2 = length-delimited
+            return _encode_varint(tag) + _encode_varint(len(data)) + data
+
+        # Use the first room ID for the room entry
+        rid = room_ids[0] if room_ids else 1
+
+        # Build the room entry. Verified against eufy app capture for room 6:
+        # JQojCgIIBhICCAYaAggGIgIIBioCCAYyAggEoAHggJme/rjW0Rg=
+        # - fields 1-5: sub-field 1 = room_id (ALL five fields carry room_id)
+        # - field 6: sub-field 1 = 4 (cleaning mode/pass count)
+        # - field 20: timestamp in nanoseconds
+        sub = _encode_field_varint(1, rid)
+        room_entry = b""
+        for fn in [1, 2, 3, 4, 5]:
+            room_entry += _encode_field_bytes(fn, sub)
+        room_entry += _encode_field_bytes(6, _encode_field_varint(1, 4))
+        room_entry += _encode_field_varint(20, round(time.time() * 1_000_000_000))
+
+        # Wrap in top-level field 1
+        message = _encode_field_bytes(1, room_entry)
+
+        # Add length prefix
+        payload = _encode_varint(len(message)) + message
+
+        return base64.b64encode(payload).decode("utf8")
 
     async def async_will_remove_from_hass(self) -> None:
         """Handle removal from Home Assistant."""
