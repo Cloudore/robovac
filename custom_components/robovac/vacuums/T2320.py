@@ -77,6 +77,9 @@ class T2320(RobovacModelDetails):
                 "DAoCCAEQBTIAcgIiAA==": "Room Cleaning",
                 "EAoCCAEQBTICCAE6AHICIgA=": "Room Cleaning",
                 "EAoCCAEQAxoAMgIIAXICIgA=": "Room Returning",
+                # Yet another status=5 room-clean variant captured live;
+                # different protobuf field ordering -> different base64.
+                "DgoCCAEQBTICCAFyAiIA": "Room Cleaning",
                 # Observed when the vacuum hits a hard error during a
                 # room-clean (e.g. main brush stuck). field2=2 in the
                 # ModeCtrlResponse protobuf with rooms_clean=true.
