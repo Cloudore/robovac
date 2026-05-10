@@ -77,6 +77,10 @@ class T2320(RobovacModelDetails):
                 "DAoCCAEQBTIAcgIiAA==": "Room Cleaning",
                 "EAoCCAEQBTICCAE6AHICIgA=": "Room Cleaning",
                 "EAoCCAEQAxoAMgIIAXICIgA=": "Room Returning",
+                # Observed when the vacuum hits a hard error during a
+                # room-clean (e.g. main brush stuck). field2=2 in the
+                # ModeCtrlResponse protobuf with rooms_clean=true.
+                "DgoCCAEQAjICCAFyAiIA": "Error",
             },
         },
         # Return home is triggered via MODE DP (152) on this model
@@ -119,6 +123,7 @@ class T2320(RobovacModelDetails):
         "Auto Cleaning": VacuumActivity.CLEANING,
         "Room Cleaning": VacuumActivity.CLEANING,
         "Room Returning": VacuumActivity.RETURNING,
+        "Error": VacuumActivity.ERROR,
         "standby": VacuumActivity.IDLE,
     }
 
