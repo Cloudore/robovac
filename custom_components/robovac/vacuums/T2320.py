@@ -66,6 +66,17 @@ class T2320(RobovacModelDetails):
                 # Observed when the vacuum is auto-cleaning off the dock
                 "CgoAEAUyAHICIgA=": "Auto Cleaning",
                 "DgoAEAUaAggBMgByAiIA": "Auto Cleaning",
+                # Observed during a room-clean (select_rooms_clean=true).
+                # Decoded protobuf shape: field1.field1=1 (rooms_clean flag),
+                # field2=5 (status=cleaning) or field2=3 (returning to dock
+                # mid-room-clean). Same status codes as auto-clean, but with
+                # the rooms_clean sub-message populated — different base64.
+                "EgoCCAEQBRoAMgIIAToAcgIiAA==": "Room Cleaning",
+                "FgoCCAEQBRoAMgIIAToCEAFyBBoAIgA=": "Room Cleaning",
+                "DgoCCAEQBRoAMgByAiIA": "Room Cleaning",
+                "DAoCCAEQBTIAcgIiAA==": "Room Cleaning",
+                "EAoCCAEQBTICCAE6AHICIgA=": "Room Cleaning",
+                "EAoCCAEQAxoAMgIIAXICIgA=": "Room Returning",
             },
         },
         # Return home is triggered via MODE DP (152) on this model
@@ -106,6 +117,8 @@ class T2320(RobovacModelDetails):
         "Drying Mop": VacuumActivity.DOCKED,
         "Fully Charged": VacuumActivity.DOCKED,
         "Auto Cleaning": VacuumActivity.CLEANING,
+        "Room Cleaning": VacuumActivity.CLEANING,
+        "Room Returning": VacuumActivity.RETURNING,
         "standby": VacuumActivity.IDLE,
     }
 
