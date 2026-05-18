@@ -85,6 +85,20 @@ class T2320(RobovacModelDetails):
                 # ModeCtrlResponse protobuf with rooms_clean=true.
                 "DgoCCAEQAjICCAFyAiIA": "Error",
             },
+            # Protobuf-decoded status codes. When the exact base64 string
+            # above doesn't match, robovac.getRoboVacHumanReadableValue
+            # decodes the ModeCtrlResponse and looks up field 2 here.
+            # Codes are the device's internal state enum and are stable
+            # across firmware and field-ordering variations, so one entry
+            # covers every base64 variant the device may emit.
+            "status_codes": {
+                2: "Error",
+                3: "Returning to dock",
+                5: "Cleaning",
+                # 4, 6, 7, 8 etc. unknown yet; the warning in robovac.py
+                # will surface them with the decoded code so they can be
+                # added with their observed Eufy app meaning.
+            },
         },
         # Return home is triggered via MODE DP (152) on this model
         RobovacCommand.RETURN_HOME: {
@@ -127,6 +141,9 @@ class T2320(RobovacModelDetails):
         "Room Cleaning": VacuumActivity.CLEANING,
         "Room Returning": VacuumActivity.RETURNING,
         "Error": VacuumActivity.ERROR,
+        # Labels produced by the protobuf fallback path
+        "Cleaning": VacuumActivity.CLEANING,
+        "Returning to dock": VacuumActivity.RETURNING,
         "standby": VacuumActivity.IDLE,
     }
 
