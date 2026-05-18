@@ -1,5 +1,6 @@
 from typing import Any, cast
 from collections.abc import Mapping
+import base64
 from homeassistant.components.vacuum import VacuumActivity
 
 from .tuyalocalapi import TuyaDevice
@@ -9,6 +10,57 @@ from .vacuums.base import RobovacCommand, RobovacModelDetails
 import logging
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _decode_status_field2(b64_value: str) -> int | None:
+    """Decode the integer status code (field 2) from a length-prefixed
+    ModeCtrlResponse protobuf, encoded as base64.
+
+    Eufy X-series devices emit the same logical status (e.g. cleaning,
+    returning, error) with multiple protobuf field orderings, producing
+    many distinct base64 strings for one underlying state. Decoding
+    field 2 directly avoids per-string maintenance.
+
+    Returns the integer status code (e.g. 2=error, 3=returning, 5=cleaning)
+    or None if the payload doesn't look like a length-prefixed protobuf.
+    """
+    try:
+        data = base64.b64decode(b64_value + "==")
+    except Exception:  # pylint: disable=broad-except
+        return None
+    if len(data) < 2:
+        return None
+    # Strip outer length prefix (single varint)
+    inner_len = data[0]
+    if inner_len & 0x80:  # multi-byte length not seen on this device family
+        return None
+    inner = data[1:1 + inner_len]
+    pos = 0
+    while pos < len(inner):
+        tag = inner[pos]
+        pos += 1
+        field = tag >> 3
+        wire = tag & 7
+        if wire == 0:  # varint
+            v = 0
+            shift = 0
+            while pos < len(inner):
+                b = inner[pos]
+                pos += 1
+                v |= (b & 0x7F) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+            if field == 2:
+                return v
+        elif wire == 2:  # length-delimited; skip
+            if pos >= len(inner):
+                return None
+            ln = inner[pos]
+            pos += 1 + ln
+        else:
+            return None
+    return None
 
 
 class ModelNotSupportedException(Exception):
@@ -231,6 +283,34 @@ class RoboVac(TuyaDevice):
                 # Direct lookup: the input value should be a key in the values dict
                 if str(value) in values:
                     return str(values[value])
+
+            # Protobuf fallback for STATUS: decode the base64 ModeCtrlResponse,
+            # extract field 2 (the integer status code), and look it up in the
+            # model's `status_codes` table. Lets one entry per logical state
+            # cover every protobuf variant the device emits.
+            if cmd == RobovacCommand.STATUS and cmd in self.model_details.commands:
+                status_def = self.model_details.commands[cmd]
+                status_codes = (
+                    status_def.get("status_codes")
+                    if isinstance(status_def, dict)
+                    else None
+                )
+                if isinstance(status_codes, dict):
+                    code = _decode_status_field2(str(value))
+                    if code is not None and code in status_codes:
+                        _LOGGER.debug(
+                            "STATUS protobuf-decoded code=%s -> %s (raw=%s)",
+                            code, status_codes[code], value,
+                        )
+                        return str(status_codes[code])
+                    if code is not None:
+                        _LOGGER.warning(
+                            "STATUS protobuf code %s not in status_codes for "
+                            "model %s (raw=%s). Add an entry to "
+                            "vacuums/%s.py STATUS.status_codes.",
+                            code, self.model_code, value, self.model_code,
+                        )
+                        return value
 
         except (ValueError, KeyError):
             pass

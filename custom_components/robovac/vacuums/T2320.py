@@ -66,6 +66,38 @@ class T2320(RobovacModelDetails):
                 # Observed when the vacuum is auto-cleaning off the dock
                 "CgoAEAUyAHICIgA=": "Auto Cleaning",
                 "DgoAEAUaAggBMgByAiIA": "Auto Cleaning",
+                # Observed during a room-clean (select_rooms_clean=true).
+                # Decoded protobuf shape: field1.field1=1 (rooms_clean flag),
+                # field2=5 (status=cleaning) or field2=3 (returning to dock
+                # mid-room-clean). Same status codes as auto-clean, but with
+                # the rooms_clean sub-message populated — different base64.
+                "EgoCCAEQBRoAMgIIAToAcgIiAA==": "Room Cleaning",
+                "FgoCCAEQBRoAMgIIAToCEAFyBBoAIgA=": "Room Cleaning",
+                "DgoCCAEQBRoAMgByAiIA": "Room Cleaning",
+                "DAoCCAEQBTIAcgIiAA==": "Room Cleaning",
+                "EAoCCAEQBTICCAE6AHICIgA=": "Room Cleaning",
+                "EAoCCAEQAxoAMgIIAXICIgA=": "Room Returning",
+                # Yet another status=5 room-clean variant captured live;
+                # different protobuf field ordering -> different base64.
+                "DgoCCAEQBTICCAFyAiIA": "Room Cleaning",
+                # Observed when the vacuum hits a hard error during a
+                # room-clean (e.g. main brush stuck). field2=2 in the
+                # ModeCtrlResponse protobuf with rooms_clean=true.
+                "DgoCCAEQAjICCAFyAiIA": "Error",
+            },
+            # Protobuf-decoded status codes. When the exact base64 string
+            # above doesn't match, robovac.getRoboVacHumanReadableValue
+            # decodes the ModeCtrlResponse and looks up field 2 here.
+            # Codes are the device's internal state enum and are stable
+            # across firmware and field-ordering variations, so one entry
+            # covers every base64 variant the device may emit.
+            "status_codes": {
+                2: "Error",
+                3: "Returning to dock",
+                5: "Cleaning",
+                # 4, 6, 7, 8 etc. unknown yet; the warning in robovac.py
+                # will surface them with the decoded code so they can be
+                # added with their observed Eufy app meaning.
             },
         },
         # Return home is triggered via MODE DP (152) on this model
@@ -106,6 +138,12 @@ class T2320(RobovacModelDetails):
         "Drying Mop": VacuumActivity.DOCKED,
         "Fully Charged": VacuumActivity.DOCKED,
         "Auto Cleaning": VacuumActivity.CLEANING,
+        "Room Cleaning": VacuumActivity.CLEANING,
+        "Room Returning": VacuumActivity.RETURNING,
+        "Error": VacuumActivity.ERROR,
+        # Labels produced by the protobuf fallback path
+        "Cleaning": VacuumActivity.CLEANING,
+        "Returning to dock": VacuumActivity.RETURNING,
         "standby": VacuumActivity.IDLE,
     }
 

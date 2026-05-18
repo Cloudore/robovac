@@ -48,6 +48,7 @@ from homeassistant.const import (
     CONF_USERNAME,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -1086,8 +1087,13 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
         """Build a normalized room entry payload."""
         key = str(identifier)
         room_label = label.strip() if isinstance(label, str) else ""
-        if not room_label:
-            room_label = key
+        # Device-reported labels for un-named segments contain control
+        # bytes (e.g. \b\x0f) that render as garbage in the HA UI. Fall
+        # back to "Room <id>" when the label has no printable characters
+        # (or is shorter than 2 printable chars — heuristic for noise).
+        printable = "".join(c for c in room_label if c.isprintable() and not c.isspace())
+        if len(printable) < 2:
+            room_label = f"Room {key}"
         return {
             "id": identifier,
             "key": key,
@@ -1826,7 +1832,7 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
     @staticmethod
     def _build_mode_ctrl_room_clean(
         room_ids: list[int],
-        map_id: int = 15,
+        map_id: int,
         clean_times: int = 1,
     ) -> str:
         """Build a ModeCtrlRequest protobuf for room cleaning, base64-encoded.
@@ -2371,7 +2377,28 @@ class RoboVacEntity(RestoreEntity, StateVacuumEntity):
                     self._extract_dps165_meta_id(str(dps165_raw))
                     if dps165_raw
                     else None
-                ) or 15  # observed value for X9 Pro on this account
+                )
+                if map_id is None:
+                    # No silent fallback: a wrong map_id silently breaks
+                    # room-targeting (device accepts the write but never
+                    # actually moves to the room). Log enough to diagnose
+                    # the user's DPS 165 shape, then raise.
+                    raw_preview = (
+                        repr(str(dps165_raw))[:200]
+                        if dps165_raw
+                        else "<not present>"
+                    )
+                    _LOGGER.error(
+                        "T2320 roomClean: could not extract map_id from "
+                        "DPS 165 (raw=%s). Cannot send room-clean command. "
+                        "Please open an issue at "
+                        "https://github.com/Cloudore/robovac/issues with this "
+                        "log line so the DPS 165 parser can be extended.",
+                        raw_preview,
+                    )
+                    raise HomeAssistantError(
+                        "Cannot resolve map_id for room clean; see logs."
+                    )
 
                 payload_b64 = self._build_mode_ctrl_room_clean(
                     [int(r) for r in room_ids],
