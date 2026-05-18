@@ -54,6 +54,7 @@ from .countries import (
 )
 from .eufywebapi import EufyLogon
 from .tuyawebapi import TuyaAPISession
+from .vacuums import ROBOVAC_MODELS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -154,12 +155,30 @@ def get_eufy_vacuums(self: dict[str, Any]) -> requests.Response:
     self[CONF_VACS] = {}
     for item in items:
         if item["product"]["appliance"] == "Cleaning":
+            product_code = item["product"]["product_code"]
+            if product_code not in ROBOVAC_MODELS:
+                # The product_code from Eufy cloud is the canonical model
+                # identifier — when it's missing from ROBOVAC_MODELS the
+                # integration would later raise ModelNotSupportedException
+                # at runtime. Warn loudly here so a new user sees what's
+                # missing before they wonder why their device isn't appearing.
+                _LOGGER.warning(
+                    "Eufy vacuum %s reports model %s which is not in "
+                    "ROBOVAC_MODELS. Skipping. Supported models: %s. "
+                    "Add a custom_components/robovac/vacuums/%s.py file "
+                    "and register it in vacuums/__init__.py to support it.",
+                    item.get("alias_name") or item["id"],
+                    product_code,
+                    sorted(ROBOVAC_MODELS.keys()),
+                    product_code,
+                )
+                continue
             try:
                 device = tuya_client.get_device(item["id"])
 
                 vac_details = {
                     CONF_ID: item["id"],
-                    CONF_MODEL: item["product"]["product_code"],
+                    CONF_MODEL: product_code,
                     CONF_NAME: item["alias_name"],
                     CONF_DESCRIPTION: item["name"],
                     CONF_MAC: item["wifi"]["mac"],
